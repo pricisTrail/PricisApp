@@ -166,6 +166,7 @@ namespace PricisApp
         private async void BtnStop_Click(object? sender, EventArgs e)
         {
             if (!isTimerRunning || !currentSessionId.HasValue) return;
+            
             try
             {
                 await UIManager.ShowLoading(this, async () =>
@@ -211,7 +212,7 @@ namespace PricisApp
             var taskName = txtTaskName.Text.Trim();
             if (string.IsNullOrWhiteSpace(taskName))
             {
-                UIManager.ShowWarning(this, "Please enter a task name.");
+                UIManager.ShowWarning(this, "Please enter a task name");
                 return;
             }
 
@@ -226,7 +227,7 @@ namespace PricisApp
             }
             catch (Exception ex)
             {
-                UIManager.ShowDetailedError(this, ex, "creating a new task");
+                UIManager.ShowDetailedError(this, ex, "creating new task");
             }
         }
 
@@ -324,21 +325,27 @@ namespace PricisApp
 
         private async void DeleteSelectedTask()
         {
-            if (listTasks.SelectedItem is not TaskItem selectedTask) return;
-            var confirm = MessageBox.Show($"Delete '{selectedTask.Name}' and all its sessions?", "Confirm Delete", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-            if (confirm != DialogResult.Yes) return;
-            try
+            if (listTasks.SelectedItem == null)
             {
-                using var cmd = db.Connection.CreateCommand();
-                cmd.CommandText = "DELETE FROM Tasks WHERE Id = $id";
-                cmd.Parameters.AddWithValue("$id", selectedTask.Id);
-                await cmd.ExecuteNonQueryAsync();
-                listTasks.Items.Remove(selectedTask);
-                dataSessions.DataSource = null;
+                UIManager.ShowWarning(this, "Please select a task to delete");
+                return;
             }
-            catch (Exception ex)
+
+            if (UIManager.ShowConfirmation(this, "Are you sure you want to delete this task?") == DialogResult.Yes)
             {
-                MessageBox.Show($"Deletion failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                try
+                {
+                    await UIManager.ShowLoading(this, async () =>
+                    {
+                        var task = (TaskItem)listTasks.SelectedItem;
+                        await db.DeleteTaskAsync(task.Id);
+                        await LoadTasks();
+                    }, "Deleting task...");
+                }
+                catch (Exception ex)
+                {
+                    UIManager.ShowDetailedError(this, ex, "deleting task");
+                }
             }
         }
 
