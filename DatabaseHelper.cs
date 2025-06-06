@@ -5,11 +5,16 @@ using System.IO;
 using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
 using System.Threading;
+using PricisApp.Repositories;
+using PricisApp.Models;
+using PricisApp.Interfaces;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Configuration;
 
 namespace PricisApp
 {
     /// <summary>
-    /// Provides database operations for PricisApp with improved error handling and resilience.
+    /// Provides database initialization and repository management for PricisApp.
     /// </summary>
     public class DatabaseHelper : IDisposable, IAsyncDisposable
     {
@@ -19,25 +24,32 @@ namespace PricisApp
         private readonly SemaphoreSlim _connectionLock = new SemaphoreSlim(1, 1);
         private const int MaxRetries = 3;
         private const int RetryDelayMs = 100;
+        private readonly IConfiguration _configuration;
+        private readonly AppSettings _appSettings;
 
-        public SqliteConnection Connection
-        {
-            get
-            {
-                if (_disposed)
-                    throw new ObjectDisposedException(nameof(DatabaseHelper));
-                return _connection ?? throw new InvalidOperationException("Database connection is not initialized.");
-            }
-        }
+        private IUnitOfWork? _unitOfWork;
+
+        public IUnitOfWork UnitOfWork => _unitOfWork ?? throw new InvalidOperationException("Database not initialized");
+
+        // Expose connection for direct access when needed
+        public SqliteConnection Connection => _connection ?? throw new InvalidOperationException("Database connection not initialized");
+
+        // Keep these properties for backward compatibility
+        public TaskRepository Tasks => UnitOfWork.Tasks;
+        public SessionRepository Sessions => UnitOfWork.Sessions;
+        public CategoryRepository Categories => UnitOfWork.Categories;
 
         /// <summary>
-        /// Initializes a new instance of the <see cref="DatabaseHelper"/> class.
+        /// Initializes a new instance of the DatabaseHelper class.
         /// </summary>
-        public DatabaseHelper(string dbFileName = "TimeTracking.db")
+        public DatabaseHelper(IConfiguration configuration, AppSettings appSettings)
         {
+            _configuration = configuration;
+            _appSettings = appSettings;
+            
             var folder = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             Directory.CreateDirectory(folder);
-            _dbPath = Path.Combine(folder, dbFileName);
+            _dbPath = Path.Combine(folder, _appSettings.Database.FileName);
             InitializeDatabase().GetAwaiter().GetResult();
         }
 
@@ -46,17 +58,17 @@ namespace PricisApp
             var connectionString = new SqliteConnectionStringBuilder
             {
                 DataSource = _dbPath,
-                Mode = SqliteOpenMode.ReadWriteCreate,
-                Cache = SqliteCacheMode.Shared,
-                Pooling = true
+                Mode = GetSqliteOpenMode(_appSettings.Database.ConnectionString.Mode),
+                Cache = GetSqliteCacheMode(_appSettings.Database.ConnectionString.Cache),
+                Pooling = _appSettings.Database.ConnectionString.Pooling
             }.ToString();
 
             _connection = new SqliteConnection(connectionString);
             await _connection.OpenAsync();
 
-            await ExecuteWithRetryAsync<bool>(async () =>
+            // Initialize schema
+            using (var cmd = _connection.CreateCommand())
             {
-                using var cmd = _connection.CreateCommand();
                 cmd.CommandText = @"
                     PRAGMA journal_mode = 'wal';
                     PRAGMA foreign_keys = ON;
@@ -73,6 +85,7 @@ namespace PricisApp
                         Name TEXT NOT NULL UNIQUE,
                         IsComplete INTEGER DEFAULT 0,
                         CategoryId INTEGER,
+                        CreatedAt TEXT NOT NULL DEFAULT (datetime('now')),
                         FOREIGN KEY(CategoryId) REFERENCES Categories(Id) ON DELETE SET NULL
                     );
                     CREATE TABLE IF NOT EXISTS TaskTags (
@@ -90,8 +103,79 @@ namespace PricisApp
                         FOREIGN KEY(TaskId) REFERENCES Tasks(Id) ON DELETE CASCADE
                     );";
                 await cmd.ExecuteNonQueryAsync();
-                return true;
-            });
+            }
+
+            // Apply migrations
+            try
+            {
+                var serviceProvider = Program.CreateServices(connectionString);
+                using var scope = serviceProvider.CreateScope();
+                var runner = scope.ServiceProvider.GetRequiredService<FluentMigrator.Runner.IMigrationRunner>();
+                runner.MigrateUp();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error applying migrations: {ex.Message}");
+                // Continue even if migrations fail - the basic schema is already created
+            }
+
+            // Initialize UnitOfWork
+            _unitOfWork = new UnitOfWork(_connection);
+        }
+
+        private SqliteOpenMode GetSqliteOpenMode(string mode)
+        {
+            return mode.ToLower() switch
+            {
+                "readonly" => SqliteOpenMode.ReadOnly,
+                "readwrite" => SqliteOpenMode.ReadWrite,
+                "readwritecreate" => SqliteOpenMode.ReadWriteCreate,
+                "memory" => SqliteOpenMode.Memory,
+                _ => SqliteOpenMode.ReadWriteCreate
+            };
+        }
+
+        private SqliteCacheMode GetSqliteCacheMode(string cache)
+        {
+            return cache.ToLower() switch
+            {
+                "default" => SqliteCacheMode.Default,
+                "private" => SqliteCacheMode.Private,
+                "shared" => SqliteCacheMode.Shared,
+                _ => SqliteCacheMode.Default
+            };
+        }
+
+        /// <summary>
+        /// Executes a function within a transaction.
+        /// </summary>
+        /// <typeparam name="T">The return type of the function.</typeparam>
+        /// <param name="func">The function to execute.</param>
+        /// <returns>The result of the function.</returns>
+        public async Task<T> ExecuteInTransactionAsync<T>(Func<IUnitOfWork, Task<T>> func)
+        {
+            if (_unitOfWork is UnitOfWork unitOfWork)
+            {
+                return await unitOfWork.ExecuteInTransactionAsync(async () => await func(unitOfWork));
+            }
+            
+            throw new InvalidOperationException("UnitOfWork is not properly initialized.");
+        }
+
+        /// <summary>
+        /// Executes an action within a transaction.
+        /// </summary>
+        /// <param name="action">The action to execute.</param>
+        public async Task ExecuteInTransactionAsync(Func<IUnitOfWork, Task> action)
+        {
+            if (_unitOfWork is UnitOfWork unitOfWork)
+            {
+                await unitOfWork.ExecuteInTransactionAsync(async () => await action(unitOfWork));
+            }
+            else
+            {
+                throw new InvalidOperationException("UnitOfWork is not properly initialized.");
+            }
         }
 
         /// <summary>
@@ -143,308 +227,160 @@ namespace PricisApp
 
         private async Task EnsureConnectionAsync()
         {
-            if (_connection?.State != ConnectionState.Open)
+            if (_connection != null && _connection.State != ConnectionState.Open)
             {
-                await _connection?.OpenAsync();
+                await _connection.OpenAsync();
             }
         }
 
         /// <summary>
-        /// Inserts a new task asynchronously with retry logic.
+        /// Inserts a new task asynchronously.
         /// </summary>
         public async Task<int> InsertTaskAsync(string taskName)
         {
-            return await ExecuteWithRetryAsync(async () =>
-            {
-                using var cmd = Connection.CreateCommand();
-                cmd.CommandText = @"
-                    INSERT INTO Tasks (Name) 
-                    VALUES ($name) 
-                    ON CONFLICT(Name) DO UPDATE SET Name=excluded.Name 
-                    RETURNING Id;";
-                cmd.Parameters.AddWithValue("$name", taskName);
-                var result = await cmd.ExecuteScalarAsync();
-                return Convert.ToInt32(result);
-            });
+            return await Tasks.InsertTaskAsync(taskName);
         }
 
         /// <summary>
-        /// Starts a new session asynchronously with retry logic.
+        /// Starts a new session asynchronously.
         /// </summary>
         public async Task<int> StartSessionAsync(int taskId, DateTime startTime, string? notes = null)
         {
-            return await ExecuteWithRetryAsync(async () =>
-            {
-                using var cmd = Connection.CreateCommand();
-                cmd.CommandText = @"
-                    INSERT INTO Sessions (TaskId, StartTime, Notes) 
-                    VALUES ($taskId, $startTime, $notes) 
-                    RETURNING Id;";
-                cmd.Parameters.AddWithValue("$taskId", taskId);
-                cmd.Parameters.AddWithValue("$startTime", startTime.ToString("o"));
-                cmd.Parameters.AddWithValue("$notes", string.IsNullOrEmpty(notes) ? DBNull.Value : notes);
-                return Convert.ToInt32(await cmd.ExecuteScalarAsync());
-            });
+            return await Sessions.InsertSessionAsync(taskId, startTime, notes);
         }
 
         /// <summary>
-        /// Ends a session asynchronously with retry logic.
+        /// Ends a session asynchronously.
         /// </summary>
         public async Task EndSessionAsync(int sessionId, DateTime endTime, string? notes = null)
         {
-            await ExecuteWithRetryAsync(async () =>
-            {
-                using var cmd = Connection.CreateCommand();
-                cmd.CommandText = @"
-                    UPDATE Sessions 
-                    SET EndTime = $endTime, 
-                        Notes = COALESCE($notes, Notes) 
-                    WHERE Id = $id";
-                cmd.Parameters.AddWithValue("$endTime", endTime.ToString("o"));
-                cmd.Parameters.AddWithValue("$notes", string.IsNullOrEmpty(notes) ? DBNull.Value : notes);
-                cmd.Parameters.AddWithValue("$id", sessionId);
-                await cmd.ExecuteNonQueryAsync();
-                return true;
-            });
+            await Sessions.UpdateSessionAsync(sessionId, endTime, notes);
         }
 
         /// <summary>
-        /// Gets all tasks asynchronously with retry logic.
+        /// Gets all tasks asynchronously.
         /// </summary>
         public async Task<List<TaskItem>> GetAllTasksAsync()
         {
-            return await ExecuteWithRetryAsync(async () =>
-            {
-                var tasks = new List<TaskItem>();
-                using var cmd = Connection.CreateCommand();
-                cmd.CommandText = @"
-                    SELECT t.Id, t.Name, t.IsComplete, c.Id, c.Name, c.Color
-                    FROM Tasks t
-                    LEFT JOIN Categories c ON t.CategoryId = c.Id
-                    ORDER BY t.Name";
-                using var reader = await cmd.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
-                {
-                    var category = reader.IsDBNull(3) ? null : new Category(
-                        reader.GetInt32(3),
-                        reader.GetString(4),
-                        reader.GetString(5)
-                    );
-                    tasks.Add(new TaskItem(
-                        reader.GetInt32(0),
-                        reader.GetString(1),
-                        reader.GetInt32(2) == 1,
-                        category
-                    ));
-                }
-                return tasks;
-            });
+            return await Tasks.GetAllTasksAsync();
         }
 
         /// <summary>
-        /// Gets all sessions for a task asynchronously with retry logic.
+        /// Gets all sessions for a task asynchronously.
         /// </summary>
         public async Task<DataTable> GetSessionsForTaskAsync(int taskId)
         {
-            return await ExecuteWithRetryAsync(async () =>
+            var sessions = await Sessions.GetSessionsForTaskAsync(taskId);
+            var table = new DataTable();
+            
+            // Create columns
+            table.Columns.Add("Start Time", typeof(string));
+            table.Columns.Add("End Time", typeof(string));
+            table.Columns.Add("Duration", typeof(string));
+            table.Columns.Add("Notes", typeof(string));
+            
+            // Add data
+            foreach (var session in sessions)
             {
-                var table = new DataTable();
-                using var cmd = Connection.CreateCommand();
-                cmd.CommandText = @"
-                    SELECT 
-                        datetime(StartTime) AS 'Start Time',
-                        datetime(EndTime) AS 'End Time',
-                        CASE 
-                            WHEN EndTime IS NULL THEN 'In Progress'
-                            ELSE time((julianday(EndTime) - julianday(StartTime)), 'unixepoch')
-                        END AS 'Duration',
-                        Notes AS 'Notes'
-                    FROM Sessions
-                    WHERE TaskId = $taskId
-                    ORDER BY StartTime DESC";
-                cmd.Parameters.AddWithValue("$taskId", taskId);
-                using var reader = await cmd.ExecuteReaderAsync();
-                table.Load(reader);
-                return table;
-            });
+                var row = table.NewRow();
+                row["Start Time"] = session.StartTime.ToString("g");
+                row["End Time"] = session.EndTime.HasValue ? session.EndTime.Value.ToString("g") : "In Progress";
+                row["Duration"] = session.Duration.HasValue ? session.Duration.Value.ToString(@"hh\:mm\:ss") : "In Progress";
+                row["Notes"] = session.Notes ?? string.Empty;
+                table.Rows.Add(row);
+            }
+            
+            return table;
         }
 
         /// <summary>
-        /// Gets a summary of all sessions asynchronously with retry logic.
+        /// Gets a summary of all sessions asynchronously.
         /// </summary>
         public async Task<DataTable> GetSessionSummaryAsync()
         {
-            return await ExecuteWithRetryAsync(async () =>
-            {
-                var table = new DataTable();
-                using var cmd = Connection.CreateCommand();
-                cmd.CommandText = @"
-                    SELECT 
-                        t.Name AS 'Task',
-                        c.Name AS 'Category',
-                        COUNT(s.Id) AS 'Sessions',
-                        SUM(CASE WHEN s.EndTime IS NULL THEN 0 
-                            ELSE (julianday(s.EndTime) - julianday(s.StartTime)) * 86400 
-                            END) AS 'TotalSeconds',
-                        time(SUM(CASE WHEN s.EndTime IS NULL THEN 0 
-                            ELSE (julianday(s.EndTime) - julianday(s.StartTime)) * 86400 
-                            END), 'unixepoch') AS 'TotalTime'
-                    FROM Tasks t
-                    LEFT JOIN Categories c ON t.CategoryId = c.Id
-                    LEFT JOIN Sessions s ON t.Id = s.TaskId
-                    GROUP BY t.Id, t.Name, c.Name
-                    ORDER BY t.Name";
-                using var reader = await cmd.ExecuteReaderAsync();
-                table.Load(reader);
-                return table;
-            });
+            return await Sessions.GetSessionSummaryAsync();
         }
 
         /// <summary>
-        /// Gets all categories asynchronously with retry logic.
+        /// Gets all categories asynchronously.
         /// </summary>
         public async Task<List<Category>> GetAllCategoriesAsync()
         {
-            return await ExecuteWithRetryAsync(async () =>
-            {
-                var categories = new List<Category>();
-                using var cmd = Connection.CreateCommand();
-                cmd.CommandText = "SELECT Id, Name, Color FROM Categories ORDER BY Name";
-                using var reader = await cmd.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
-                {
-                    categories.Add(new Category(
-                        reader.GetInt32(0),
-                        reader.GetString(1),
-                        reader.IsDBNull(2) ? "#FFFFFF" : reader.GetString(2)
-                    ));
-                }
-                return categories;
-            });
+            return await Categories.GetAllCategoriesAsync();
         }
 
         /// <summary>
-        /// Inserts a new category asynchronously with retry logic.
+        /// Inserts a new category asynchronously.
         /// </summary>
         public async Task<int> InsertCategoryAsync(string name, string color)
         {
-            return await ExecuteWithRetryAsync(async () =>
-            {
-                using var cmd = Connection.CreateCommand();
-                cmd.CommandText = @"
-                    INSERT INTO Categories (Name, Color) 
-                    VALUES ($name, $color) 
-                    RETURNING Id;";
-                cmd.Parameters.AddWithValue("$name", name);
-                cmd.Parameters.AddWithValue("$color", color);
-                return Convert.ToInt32(await cmd.ExecuteScalarAsync());
-            });
+            return await Categories.InsertCategoryAsync(name, color);
         }
 
         /// <summary>
-        /// Updates a task's category asynchronously with retry logic.
+        /// Updates a task's category asynchronously.
         /// </summary>
         public async Task UpdateTaskCategoryAsync(int taskId, int? categoryId)
         {
-            await ExecuteWithRetryAsync(async () =>
-            {
-                using var cmd = Connection.CreateCommand();
-                cmd.CommandText = @"
-                    UPDATE Tasks 
-                    SET CategoryId = $categoryId 
-                    WHERE Id = $taskId";
-                cmd.Parameters.AddWithValue("$categoryId", categoryId);
-                cmd.Parameters.AddWithValue("$taskId", taskId);
-                await cmd.ExecuteNonQueryAsync();
-                return true;
-            });
+            await Tasks.UpdateTaskCategoryAsync(taskId, categoryId);
         }
 
         /// <summary>
-        /// Updates a task's tags asynchronously with retry logic.
+        /// Updates a task's tags asynchronously.
         /// </summary>
         public async Task UpdateTaskTagsAsync(int taskId, IEnumerable<string> tags)
         {
-            await ExecuteWithRetryAsync(async () =>
-            {
-                using var transaction = Connection.BeginTransaction();
-                try
-                {
-                    using var deleteCmd = Connection.CreateCommand();
-                    deleteCmd.CommandText = "DELETE FROM TaskTags WHERE TaskId = $taskId";
-                    deleteCmd.Parameters.AddWithValue("$taskId", taskId);
-                    await deleteCmd.ExecuteNonQueryAsync();
-
-                    foreach (var tag in tags)
-                    {
-                        using var insertCmd = Connection.CreateCommand();
-                        insertCmd.CommandText = @"
-                            INSERT INTO TaskTags (TaskId, Tag) 
-                            VALUES ($taskId, $tag)";
-                        insertCmd.Parameters.AddWithValue("$taskId", taskId);
-                        insertCmd.Parameters.AddWithValue("$tag", tag.Trim());
-                        await insertCmd.ExecuteNonQueryAsync();
-                    }
-                    transaction.Commit();
-                    return true;
-                }
-                catch
-                {
-                    transaction.Rollback();
-                    throw;
-                }
-            });
+            await Tasks.UpdateTaskTagsAsync(taskId, tags);
         }
 
         /// <summary>
-        /// Gets all tags for a task asynchronously with retry logic.
+        /// Gets all tags for a task asynchronously.
         /// </summary>
         public async Task<List<string>> GetTagsForTaskAsync(int taskId)
         {
-            return await ExecuteWithRetryAsync(async () =>
-            {
-                var tags = new List<string>();
-                using var cmd = Connection.CreateCommand();
-                cmd.CommandText = "SELECT Tag FROM TaskTags WHERE TaskId = $taskId ORDER BY Tag";
-                cmd.Parameters.AddWithValue("$taskId", taskId);
-                using var reader = await cmd.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
-                {
-                    tags.Add(reader.GetString(0));
-                }
-                return tags;
-            });
+            return await Tasks.GetTagsForTaskAsync(taskId);
         }
 
         /// <summary>
-        /// Disposes the database connection synchronously.
+        /// Gets tasks filtered by completion status.
         /// </summary>
+        public async Task<List<TaskItem>> GetTasksByCompletionAsync(bool isComplete)
+        {
+            return await Tasks.GetTasksByCompletionAsync(isComplete);
+        }
+
         public void Dispose()
         {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
             if (!_disposed)
             {
-                _connection?.Dispose();
-                _connectionLock.Dispose();
+                if (disposing)
+                {
+                    _unitOfWork?.Dispose();
+                    _connection?.Dispose();
+                }
                 _disposed = true;
             }
         }
 
-        /// <summary>
-        /// Disposes the database connection asynchronously.
-        /// </summary>
         public async ValueTask DisposeAsync()
         {
-            if (!_disposed)
-            {
-                if (_connection != null)
-                {
-                    await _connection.CloseAsync();
-                    await _connection.DisposeAsync();
-                }
-                _connectionLock.Dispose();
-                _disposed = true;
-            }
+            await DisposeAsyncCore();
+            Dispose(false);
             GC.SuppressFinalize(this);
+        }
+
+        protected virtual async ValueTask DisposeAsyncCore()
+        {
+            if (_unitOfWork != null)
+                await _unitOfWork.DisposeAsync();
+            if (_connection != null)
+                await _connection.DisposeAsync();
         }
     }
 }

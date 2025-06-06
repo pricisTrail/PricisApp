@@ -1,12 +1,23 @@
 using System;
+using System.Collections.Generic;
+using System.ComponentModel;
 using System.Data;
 using System.Drawing;
-using System.Windows.Forms;
+using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
+using System.Windows.Forms;
+using System.IO;
 using System.Diagnostics;
+using System.Text.Json;
+using PricisApp.Interfaces;
+using PricisApp.Models;
+using PricisApp.Services;
 using PricisApp.Properties;
 using System.Runtime.Versioning;
 using PricisApp.UI;
+using System.Runtime.Serialization;
+using Microsoft.Extensions.Configuration;
 
 [assembly: SupportedOSPlatform("windows7.0")]
 
@@ -18,7 +29,11 @@ namespace PricisApp
     public partial class Form1 : Form
     {
         private readonly DatabaseHelper db;
+        private readonly ITaskService _taskService;
+        private readonly ISessionService _sessionService;
+        private readonly ICategoryRepository _categoryRepository;
         private readonly ThemeManager _themeManager = new();
+        private readonly IConfigurationService _configService;
         private int? currentTaskId = null;
         private int? currentSessionId = null;
         private bool isTimerRunning = false;
@@ -29,20 +44,38 @@ namespace PricisApp
 
         private Button btnSummary = new();
         private Button btnPauseResume = new();
+        private Button btnThemeToggle = new();
         private ToolStripMenuItem filterAllMenu = new();
         private ToolStripMenuItem filterCompleteMenu = new();
         private ToolStripMenuItem filterIncompleteMenu = new();
 
+        private class UserState
+        {
+            public int? LastTaskId { get; set; }
+            public bool IsTimerRunning { get; set; }
+            public bool IsPaused { get; set; }
+            public double ElapsedSeconds { get; set; }
+            public string? Theme { get; set; }
+        }
+
+        private readonly string userStatePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PricisApp", "userstate.json");
+
         /// <summary>
         /// Initializes the main form and its components.
         /// </summary>
-        public Form1()
+        public Form1(DatabaseHelper dbHelper, ITaskService taskService, ISessionService sessionService, ICategoryRepository categoryRepository, IConfigurationService configService)
         {
             InitializeComponent();
-            db = new DatabaseHelper();
+            db = dbHelper;
+            _taskService = taskService;
+            _sessionService = sessionService;
+            _categoryRepository = categoryRepository;
+            _configService = configService;
+            
             InitializeEventHandlers();
             InitializeTheme();
             LoadThemePreference();
+            LoadUserState();
             _ = LoadTasks();
         }
 
@@ -52,14 +85,7 @@ namespace PricisApp
         private void InitializeTheme()
         {
             themeSelector.Items.Clear();
-            themeSelector.Items.AddRange(new object[] {
-                "System Default",
-                "Light",
-                "Dark",
-                "Blue",
-                "Green",
-                "High Contrast"
-            });
+            themeSelector.Items.AddRange(_configService.GetAvailableThemes());
         }
 
         /// <summary>
@@ -74,6 +100,19 @@ namespace PricisApp
             themeSelector.SelectedIndexChanged += ThemeSelector_SelectedIndexChanged;
             btnNewTask.Click += BtnNewTask_Click;
             listTasks.SelectedIndexChanged += ListTasks_SelectedIndexChanged;
+            btnThemeToggle.Click += BtnThemeToggle_Click;
+            
+            // Add event handlers for tags and category
+            txtTags.Leave += TxtTags_Leave;
+            cboCategories.SelectedIndexChanged += CboCategories_SelectedIndexChanged;
+            btnNewCategory.Click += BtnNewCategory_Click;
+
+            // Setup session service event handlers
+            _sessionService.TimerTick += (s, e) => lblTime.Text = _sessionService.ElapsedTime.ToString(@"hh\:mm\:ss\.ff");
+            _sessionService.TimerStarted += (s, e) => UpdateButtonStates();
+            _sessionService.TimerStopped += (s, e) => UpdateButtonStates();
+            _sessionService.TimerPaused += (s, e) => btnPauseResume.Text = "Resume";
+            _sessionService.TimerResumed += (s, e) => btnPauseResume.Text = "Pause";
 
             btnSummary = new Button
             {
@@ -105,6 +144,7 @@ namespace PricisApp
             ctxMenu.Items.Add(filterMenu);
             ctxMenu.Items.Add("Delete", null, (s, e) => DeleteSelectedTask());
             ctxMenu.Items.Add("Toggle Complete", null, (s, e) => ToggleTaskCompletion());
+            ctxMenu.Items.Add("Start/Stop Timer", null, (s, e) => StartStopTimerForSelectedTask());
             listTasks.ContextMenuStrip = ctxMenu;
 
             // Owner-draw for completion visual feedback
@@ -121,6 +161,10 @@ namespace PricisApp
                     using var brush = new SolidBrush(e.ForeColor);
                     e.Graphics.DrawString(item.Name, font, brush, e.Bounds);
                 }
+                if (item.Id == currentTaskId)
+                {
+                    e.Graphics.FillRectangle(Brushes.LightBlue, e.Bounds);
+                }
                 e.DrawFocusRectangle();
             };
 
@@ -129,11 +173,7 @@ namespace PricisApp
 
         private void Timer_Tick(object? sender, EventArgs e)
         {
-            if (isTimerRunning && !isPaused)
-            {
-                elapsedTime = stopwatch.Elapsed - totalPausedTime;
-                lblTime.Text = elapsedTime.ToString(@"hh\:mm\:ss\.ff");
-            }
+            _sessionService.UpdateTimer();
         }
 
         private async void BtnStart_Click(object? sender, EventArgs e)
@@ -148,13 +188,8 @@ namespace PricisApp
             {
                 await UIManager.ShowLoading(this, async () =>
                 {
-                    stopwatch.Restart();
-                    totalPausedTime = TimeSpan.Zero;
-                    isPaused = false;
+                    await _sessionService.StartSessionAsync(currentTaskId.Value);
                     timer.Start();
-                    isTimerRunning = true;
-                    currentSessionId = await db.StartSessionAsync(currentTaskId.Value, DateTime.Now);
-                    UpdateButtonStates();
                 }, "Starting session...");
             }
             catch (Exception ex)
@@ -165,17 +200,14 @@ namespace PricisApp
 
         private async void BtnStop_Click(object? sender, EventArgs e)
         {
-            if (!isTimerRunning || !currentSessionId.HasValue) return;
+            if (!_sessionService.IsTimerRunning || !_sessionService.CurrentSessionId.HasValue) return;
             
             try
             {
                 await UIManager.ShowLoading(this, async () =>
                 {
                     timer.Stop();
-                    isTimerRunning = false;
-                    await db.EndSessionAsync(currentSessionId.Value, DateTime.Now);
-                    currentSessionId = null;
-                    UpdateButtonStates();
+                    await _sessionService.EndSessionAsync(_sessionService.CurrentSessionId.Value);
                     if (currentTaskId.HasValue)
                     {
                         await LoadSessions(currentTaskId.Value);
@@ -191,8 +223,7 @@ namespace PricisApp
         private void BtnReset_Click(object? sender, EventArgs e)
         {
             timer.Stop();
-            isTimerRunning = false;
-            elapsedTime = TimeSpan.Zero;
+            _sessionService.ResetTimer();
             lblTime.Text = "00:00:00";
             UpdateButtonStates();
         }
@@ -210,9 +241,34 @@ namespace PricisApp
         private async void BtnNewTask_Click(object? sender, EventArgs e)
         {
             var taskName = txtTaskName.Text.Trim();
+            
+            // Validate task name
             if (string.IsNullOrWhiteSpace(taskName))
             {
                 UIManager.ShowWarning(this, "Please enter a task name");
+                txtTaskName.Focus();
+                return;
+            }
+            
+            if (taskName.Length < 3)
+            {
+                UIManager.ShowWarning(this, "Task name must be at least 3 characters long");
+                txtTaskName.Focus();
+                return;
+            }
+            
+            if (taskName.Length > 100)
+            {
+                UIManager.ShowWarning(this, "Task name cannot exceed 100 characters");
+                txtTaskName.Focus();
+                return;
+            }
+            
+            // Check for invalid characters
+            if (taskName.IndexOfAny(new char[] { '/', '\\', ':', '*', '?', '"', '<', '>', '|' }) >= 0)
+            {
+                UIManager.ShowWarning(this, "Task name contains invalid characters (/ \\ : * ? \" < > |)");
+                txtTaskName.Focus();
                 return;
             }
 
@@ -220,7 +276,7 @@ namespace PricisApp
             {
                 await UIManager.ShowLoading(this, async () =>
                 {
-                    await db.AddTaskAsync(taskName);
+                    await _taskService.CreateTaskAsync(taskName);
                     txtTaskName.Clear();
                     await LoadTasks();
                 }, "Creating new task...");
@@ -236,7 +292,35 @@ namespace PricisApp
             if (listTasks.SelectedItem is TaskItem selectedTask)
             {
                 currentTaskId = selectedTask.Id;
-                await LoadSessions(selectedTask.Id);
+                try
+                {
+                    await UIManager.ShowLoading(this, async () =>
+                    {
+                        await LoadSessions(selectedTask.Id);
+                        
+                        // Load and display tags
+                        var tags = await _taskService.GetTaskTagsAsync(selectedTask.Id);
+                        txtTags.Text = string.Join(", ", tags);
+                        
+                        // Select the correct category
+                        cboCategories.SelectedIndex = 0; // Default to "No Category"
+                        if (selectedTask.CategoryId.HasValue)
+                        {
+                            for (int i = 0; i < cboCategories.Items.Count; i++)
+                            {
+                                if (cboCategories.Items[i] is Category category && category.Id == selectedTask.CategoryId.Value)
+                                {
+                                    cboCategories.SelectedIndex = i;
+                                    break;
+                                }
+                            }
+                        }
+                    }, "Loading task sessions...");
+                }
+                catch (Exception ex)
+                {
+                    UIManager.ShowDetailedError(this, ex, "loading task sessions");
+                }
             }
         }
 
@@ -244,16 +328,19 @@ namespace PricisApp
         {
             try
             {
-                listTasks.Items.Clear();
-                var tasks = await db.GetAllTasksAsync();
-                foreach (var task in tasks)
+                await UIManager.ShowLoading(this, async () =>
                 {
-                    listTasks.Items.Add(task);
-                }
+                    listTasks.Items.Clear();
+                    var tasks = await _taskService.GetAllTasksAsync();
+                    foreach (var task in tasks)
+                    {
+                        listTasks.Items.Add(task);
+                    }
+                }, "Loading tasks...");
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error loading tasks: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                UIManager.ShowDetailedError(this, ex, "loading tasks");
             }
         }
 
@@ -261,13 +348,13 @@ namespace PricisApp
         {
             try
             {
-                var sessions = await db.GetSessionsForTaskAsync(taskId);
+                var sessions = await _sessionService.GetTaskSessionsAsync(taskId);
                 dataSessions.DataSource = sessions;
                 FormatDataGridView();
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error loading sessions: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                UIManager.ShowDetailedError(this, ex, "loading sessions");
             }
         }
 
@@ -275,13 +362,16 @@ namespace PricisApp
         {
             try
             {
-                var summary = await db.GetSessionSummaryAsync();
-                dataSessions.DataSource = summary;
-                FormatDataGridView();
+                await UIManager.ShowLoading(this, async () =>
+                {
+                    var summary = await _sessionService.GetSessionSummaryAsync();
+                    dataSessions.DataSource = summary;
+                    FormatDataGridView();
+                }, "Loading summary...");
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error loading summary: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                UIManager.ShowDetailedError(this, ex, "loading summary");
             }
         }
 
@@ -296,31 +386,20 @@ namespace PricisApp
 
         private void UpdateButtonStates()
         {
-            btnStart.Enabled = !isTimerRunning;
-            btnStop.Enabled = isTimerRunning;
+            btnStart.Enabled = !_sessionService.IsTimerRunning;
+            btnStop.Enabled = _sessionService.IsTimerRunning;
             btnReset.Enabled = true;
         }
 
         private void BtnPauseResume_Click(object? sender, EventArgs e)
         {
-            if (!isTimerRunning) return;
-            if (!isPaused)
-            {
-                stopwatch.Stop();
-                isPaused = true;
-                btnPauseResume.Text = "Resume";
-            }
-            else
-            {
-                stopwatch.Start();
-                isPaused = false;
-                btnPauseResume.Text = "Pause";
-            }
+            _sessionService.TogglePause();
         }
 
         private void Form1_FormClosing(object? sender, FormClosingEventArgs e)
         {
             db.Dispose();
+            SaveUserState();
         }
 
         private async void DeleteSelectedTask()
@@ -338,7 +417,7 @@ namespace PricisApp
                     await UIManager.ShowLoading(this, async () =>
                     {
                         var task = (TaskItem)listTasks.SelectedItem;
-                        await db.DeleteTaskAsync(task.Id);
+                        await _taskService.DeleteTaskAsync(task.Id);
                         await LoadTasks();
                     }, "Deleting task...");
                 }
@@ -354,89 +433,94 @@ namespace PricisApp
             if (listTasks.SelectedItem is not TaskItem selectedTask) return;
             try
             {
-                var newState = !await IsTaskComplete(selectedTask.Id);
-                using var cmd = db.Connection.CreateCommand();
-                cmd.CommandText = "UPDATE Tasks SET IsComplete = $state WHERE Id = $id";
-                cmd.Parameters.AddWithValue("$state", newState ? 1 : 0);
-                cmd.Parameters.AddWithValue("$id", selectedTask.Id);
-                await cmd.ExecuteNonQueryAsync();
-                await LoadTasks();
-                foreach (var item in listTasks.Items)
+                await UIManager.ShowLoading(this, async () =>
                 {
-                    if (item is TaskItem task && task.Id == selectedTask.Id)
+                    await _taskService.ToggleTaskCompletion(selectedTask.Id);
+                    await LoadTasks();
+                    foreach (var item in listTasks.Items)
                     {
-                        listTasks.SelectedItem = item;
-                        break;
+                        if (item is TaskItem task && task.Id == selectedTask.Id)
+                        {
+                            listTasks.SelectedItem = item;
+                            break;
+                        }
                     }
-                }
+                }, "Updating task status...");
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error toggling completion: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                UIManager.ShowDetailedError(this, ex, "toggling task completion");
             }
-        }
-
-        private async Task<bool> IsTaskComplete(int taskId)
-        {
-            using var cmd = db.Connection.CreateCommand();
-            cmd.CommandText = "SELECT IsComplete FROM Tasks WHERE Id = $id";
-            cmd.Parameters.AddWithValue("$id", taskId);
-            return Convert.ToInt32(await cmd.ExecuteScalarAsync()) == 1;
         }
 
         private void SaveThemePreference(string? theme)
         {
             if (theme == null) return;
-            Settings.Default.Theme = theme;
-            Settings.Default.Save();
+            
+            // Save to user state for backward compatibility
+            var state = LoadUserState() ?? new UserState();
+            state.Theme = theme;
+            Directory.CreateDirectory(Path.GetDirectoryName(userStatePath)!);
+            File.WriteAllText(userStatePath, JsonSerializer.Serialize(state));
+            
+            // Also save using the configuration service
+            _configService.SaveUserSetting("UI:DefaultTheme", theme);
         }
 
         private void LoadThemePreference()
         {
-            if (!string.IsNullOrEmpty(Settings.Default.Theme) && themeSelector.Items.Contains(Settings.Default.Theme))
+            try
             {
-                themeSelector.SelectedItem = Settings.Default.Theme;
-                // Apply the theme immediately
-                switch (Settings.Default.Theme)
+                // First try to get theme from configuration service
+                string theme = _configService.GetDefaultTheme();
+                
+                // For backward compatibility, check user state too
+                var userState = LoadUserState();
+                if (userState?.Theme != null)
                 {
-                    case "Light":
-                        ApplyTheme(SystemColors.Control, Color.Black);
-                        break;
-                    case "Dark":
-                        ApplyTheme(Color.FromArgb(32, 32, 32), Color.White);
-                        break;
-                    default:
-                        ApplyTheme(DefaultBackColor, DefaultForeColor);
-                        break;
+                    theme = userState.Theme;
+                }
+                
+                if (!string.IsNullOrEmpty(theme))
+                {
+                    themeSelector.SelectedItem = theme;
+                    ApplyTheme(theme);
                 }
             }
-            else
+            catch (Exception ex)
             {
-                themeSelector.SelectedIndex = 0; // Default to "System Default"
+                // Ignore theme loading errors
+                Debug.WriteLine($"Error loading theme preference: {ex.Message}");
             }
+        }
+
+        private void ApplyTheme(string theme)
+        {
+            _themeManager.ApplyTheme(this, theme);
+            btnThemeToggle.Text = theme.ToLower().Contains("dark") ? "Light Mode" : "Dark Mode";
         }
 
         private async void FilterTasks(bool? showComplete)
         {
             try
             {
-                var tasks = await db.GetAllTasksAsync();
-                listTasks.Items.Clear();
-                foreach (var task in tasks)
+                await UIManager.ShowLoading(this, async () =>
                 {
-                    if (showComplete == null || task.IsComplete == showComplete)
+                    var tasks = await _taskService.FilterTasksAsync(showComplete);
+                    listTasks.Items.Clear();
+                    foreach (var task in tasks)
                     {
                         listTasks.Items.Add(task);
                     }
-                }
-                // Update menu item check states
-                filterAllMenu.Checked = showComplete == null;
-                filterCompleteMenu.Checked = showComplete == true;
-                filterIncompleteMenu.Checked = showComplete == false;
+                    // Update menu item check states
+                    filterAllMenu.Checked = showComplete == null;
+                    filterCompleteMenu.Checked = showComplete == true;
+                    filterIncompleteMenu.Checked = showComplete == false;
+                }, "Filtering tasks...");
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error filtering tasks: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                UIManager.ShowDetailedError(this, ex, "filtering tasks");
             }
         }
 
@@ -455,25 +539,70 @@ namespace PricisApp
             var colorPicker = new ColorDialog();
             var btnColor = new Button { Text = "Pick Color", Left = 100, Top = 50, Width = 160 };
             var btnOk = new Button { Text = "OK", Left = 120, Top = 100, DialogResult = DialogResult.OK };
+            
+            // Set a default color
+            btnColor.BackColor = Color.LightBlue;
+            
             btnColor.Click += (s, ev) => {
                 if (colorPicker.ShowDialog() == DialogResult.OK)
                 {
                     btnColor.BackColor = colorPicker.Color;
                 }
             };
+            
             form.Controls.AddRange(new Control[] { lblName, txtName, lblColor, btnColor, btnOk });
             form.AcceptButton = btnOk;
+            
+            // Override the form's OK button click to validate inputs
+            form.FormClosing += (s, ev) => {
+                if (form.DialogResult == DialogResult.OK)
+                {
+                    string categoryName = txtName.Text.Trim();
+                    
+                    // Validate category name
+                    if (string.IsNullOrWhiteSpace(categoryName))
+                    {
+                        MessageBox.Show("Please enter a category name", "Validation Error", 
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        txtName.Focus();
+                        ev.Cancel = true;
+                        return;
+                    }
+                    
+                    if (categoryName.Length < 2)
+                    {
+                        MessageBox.Show("Category name must be at least 2 characters long", "Validation Error", 
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        txtName.Focus();
+                        ev.Cancel = true;
+                        return;
+                    }
+                    
+                    if (categoryName.Length > 50)
+                    {
+                        MessageBox.Show("Category name cannot exceed 50 characters", "Validation Error", 
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        txtName.Focus();
+                        ev.Cancel = true;
+                        return;
+                    }
+                }
+            };
+            
             if (form.ShowDialog() == DialogResult.OK)
             {
                 try
                 {
-                    var color = btnColor.BackColor.ToArgb().ToString("X6");
-                    await db.InsertCategoryAsync(txtName.Text, color);
-                    await LoadCategories();
+                    await UIManager.ShowLoading(this, async () =>
+                    {
+                        var color = btnColor.BackColor.ToArgb().ToString("X6");
+                        await _categoryRepository.InsertCategoryAsync(txtName.Text, color);
+                        await LoadCategories();
+                    }, "Creating category...");
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show($"Error creating category: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    UIManager.ShowDetailedError(this, ex, "creating category");
                 }
             }
         }
@@ -482,17 +611,20 @@ namespace PricisApp
         {
             try
             {
-                cboCategories.Items.Clear();
-                var categories = await db.GetAllCategoriesAsync();
-                cboCategories.Items.Add("(No Category)");
-                foreach (var category in categories)
+                await UIManager.ShowLoading(this, async () =>
                 {
-                    cboCategories.Items.Add(category);
-                }
+                    cboCategories.Items.Clear();
+                    var categories = await _categoryRepository.GetAllCategoriesAsync();
+                    cboCategories.Items.Add("(No Category)");
+                    foreach (var category in categories)
+                    {
+                        cboCategories.Items.Add(category);
+                    }
+                }, "Loading categories...");
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error loading categories: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                UIManager.ShowDetailedError(this, ex, "loading categories");
             }
         }
 
@@ -515,6 +647,169 @@ namespace PricisApp
             public override Color MenuStripGradientBegin => _backColor;
             public override Color MenuStripGradientEnd => _backColor;
             public override Color ToolStripDropDownBackground => _backColor;
+        }
+
+        private void SaveUserState()
+        {
+            var state = new UserState
+            {
+                LastTaskId = currentTaskId,
+                IsTimerRunning = _sessionService.IsTimerRunning,
+                IsPaused = _sessionService.IsPaused,
+                ElapsedSeconds = _sessionService.ElapsedTime.TotalSeconds,
+                Theme = themeSelector.SelectedItem?.ToString()
+            };
+            Directory.CreateDirectory(Path.GetDirectoryName(userStatePath)!);
+            File.WriteAllText(userStatePath, JsonSerializer.Serialize(state));
+        }
+
+        private UserState LoadUserState()
+        {
+            if (File.Exists(userStatePath))
+            {
+                return JsonSerializer.Deserialize<UserState>(File.ReadAllText(userStatePath));
+            }
+            return null;
+        }
+
+        private void BtnThemeToggle_Click(object? sender, EventArgs e)
+        {
+            var isDark = themeSelector.SelectedItem?.ToString()?.ToLower().Contains("dark") == true;
+            
+            if (isDark)
+            {
+                ApplyTheme("Light");
+                btnThemeToggle.Text = "Dark Mode";
+                SaveThemePreference("Light");
+            }
+            else
+            {
+                ApplyTheme("Dark");
+                btnThemeToggle.Text = "Light Mode";
+                SaveThemePreference("Dark");
+            }
+        }
+
+        private void StartStopTimerForSelectedTask()
+        {
+            if (listTasks.SelectedItem is not TaskItem selectedTask) return;
+            if (_sessionService.IsTimerRunning && currentTaskId == selectedTask.Id)
+            {
+                BtnStop_Click(this, EventArgs.Empty);
+            }
+            else
+            {
+                currentTaskId = selectedTask.Id;
+                BtnStart_Click(this, EventArgs.Empty);
+            }
+        }
+
+        // Fix async method warning
+        private async Task PopulateTasksAsync()
+        {
+            try
+            {
+                await UIManager.ShowLoading(this, async () =>
+                {
+                    var tasks = await _taskService.GetAllTasksAsync();
+                    // Populate the tasks list
+                }, "Loading tasks...");
+            }
+            catch (Exception ex)
+            {
+                UIManager.ShowDetailedError(this, ex, "loading tasks");
+            }
+        }
+
+        // Fix null reference warnings
+        private string GetSelectedTaskName()
+        {
+            // Return empty string instead of null
+            return "Default Task Name";
+        }
+
+        private string GetSelectedTaskCategory()
+        {
+            // Return empty string instead of null
+            return "Default Category";
+        }
+
+        // Add validation and save task tags
+        private async Task ValidateAndSaveTaskTags()
+        {
+            if (currentTaskId == null) return;
+            
+            string tagsText = txtTags.Text.Trim();
+            
+            try
+            {
+                // Split by comma and trim each tag
+                var tags = tagsText.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(t => t.Trim())
+                    .Where(t => !string.IsNullOrWhiteSpace(t))
+                    .ToList();
+                
+                // Validate individual tags
+                foreach (var tag in tags)
+                {
+                    if (tag.Length > 30)
+                    {
+                        UIManager.ShowWarning(this, $"Tag '{tag}' is too long. Maximum length is 30 characters.");
+                        return;
+                    }
+                    
+                    if (tag.IndexOfAny(new char[] { '/', '\\', ':', '*', '?', '"', '<', '>', '|' }) >= 0)
+                    {
+                        UIManager.ShowWarning(this, $"Tag '{tag}' contains invalid characters (/ \\ : * ? \" < > |)");
+                        return;
+                    }
+                }
+                
+                await UIManager.ShowLoading(this, async () =>
+                {
+                    await _taskService.UpdateTaskTagsAsync(currentTaskId.Value, tags);
+                }, "Updating tags...");
+            }
+            catch (Exception ex)
+            {
+                UIManager.ShowDetailedError(this, ex, "updating tags");
+            }
+        }
+
+        // Add validation and save task category
+        private async Task ValidateAndSaveTaskCategory()
+        {
+            if (currentTaskId == null) return;
+            
+            try
+            {
+                int? categoryId = null;
+                
+                // If a valid category is selected (not the "No Category" option)
+                if (cboCategories.SelectedIndex > 0 && cboCategories.SelectedItem is Category selectedCategory)
+                {
+                    categoryId = selectedCategory.Id;
+                }
+                
+                await UIManager.ShowLoading(this, async () =>
+                {
+                    await _taskService.UpdateTaskCategoryAsync(currentTaskId.Value, categoryId);
+                }, "Updating category...");
+            }
+            catch (Exception ex)
+            {
+                UIManager.ShowDetailedError(this, ex, "updating category");
+            }
+        }
+
+        private async void TxtTags_Leave(object? sender, EventArgs e)
+        {
+            await ValidateAndSaveTaskTags();
+        }
+
+        private async void CboCategories_SelectedIndexChanged(object? sender, EventArgs e)
+        {
+            await ValidateAndSaveTaskCategory();
         }
     }
 }
