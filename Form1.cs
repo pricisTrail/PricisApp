@@ -36,8 +36,8 @@ namespace PricisApp
         private readonly MaterialSkinManager _materialSkinManager;
         private readonly BindingSource _categoriesBindingSource = new();
         private readonly BindingSource _sessionsBindingSource = new();
-        private ComboBox cboIncompleteSessions;
-        private MaterialButton btnResumeSession;
+        private ComboBox? cboIncompleteSessions;
+        private MaterialButton? btnResumeSession;
 
         /// <summary>
         /// Initializes the main form and its components.
@@ -82,42 +82,72 @@ namespace PricisApp
             themeSelector.DataSource = _viewModel.AvailableThemes;
             themeSelector.SelectedItem = _viewModel.CurrentTheme;
 
-            // Create additional buttons
+            // Create a FlowLayoutPanel for action buttons
+            var actionButtonsPanel = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 70, // Adjusted for potential two rows or taller controls
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = true, // Allow wrapping
+                Padding = new Padding(5)
+            };
+
+            // Create additional buttons and add them to the actionButtonsPanel
             var btnSummary = new MaterialButton
             {
                 Text = "Show Summary",
-                Location = new Point(310, 110),
-                Size = new Size(100, 23)
+                Size = new Size(120, 36) // Standard MaterialButton size
             };
             btnSummary.Click += (s, e) => _viewModel.ShowSummaryCommand.Execute(null);
-            Controls.Add(btnSummary);
+            actionButtonsPanel.Controls.Add(btnSummary);
 
             var btnDashboard = new MaterialButton
             {
                 Text = "Dashboard",
-                Location = new Point(310, 140),
-                Size = new Size(100, 23)
+                Size = new Size(120, 36)
             };
             btnDashboard.Click += (s, e) => _viewModel.ShowDashboardCommand.Execute(null);
-            Controls.Add(btnDashboard);
+            actionButtonsPanel.Controls.Add(btnDashboard);
 
             var btnPauseResume = new MaterialButton
             {
-                Text = "Pause",
-                Location = new Point(420, 110),
-                Size = new Size(100, 23)
+                Text = "Pause", // Initial text, will be updated
+                Size = new Size(100, 36)
             };
             btnPauseResume.Click += (s, e) => _viewModel.PauseResumeCommand.Execute(null);
-            Controls.Add(btnPauseResume);
+            actionButtonsPanel.Controls.Add(btnPauseResume);
 
             var btnThemeToggle = new MaterialButton
             {
                 Text = "Toggle Theme",
-                Location = new Point(530, 110),
-                Size = new Size(100, 23)
+                Size = new Size(130, 36)
             };
             btnThemeToggle.Click += (s, e) => _viewModel.ToggleThemeCommand.Execute(null);
-            Controls.Add(btnThemeToggle);
+            actionButtonsPanel.Controls.Add(btnThemeToggle);
+            
+            // Add ComboBox for incomplete sessions to the actionButtonsPanel
+            cboIncompleteSessions = new ComboBox
+            {
+                Size = new Size(210, 23), // Standard ComboBox height
+                DropDownStyle = ComboBoxStyle.DropDownList
+            };
+            actionButtonsPanel.Controls.Add(cboIncompleteSessions);
+
+            // Add Resume button to the actionButtonsPanel
+            btnResumeSession = new MaterialButton
+            {
+                Text = "Resume Session",
+                Size = new Size(140, 36)
+            };
+            btnResumeSession.Click += (s, e) => 
+            {
+                if (_viewModel.ResumeSessionCommand.CanExecute(null))
+                    _viewModel.ResumeSessionCommand.Execute(null);
+            };
+            actionButtonsPanel.Controls.Add(btnResumeSession);
+
+            // Add the actionButtonsPanel to tabPage1
+            this.tabPage1.Controls.Add(actionButtonsPanel);
 
             // Setup context menu for the task list
             var ctxMenu = new ContextMenuStrip();
@@ -136,24 +166,8 @@ namespace PricisApp
             // Update button states based on current view model state
             UpdateButtonStates();
 
-            // Add ComboBox for incomplete sessions
-            cboIncompleteSessions = new ComboBox
-            {
-                Location = new Point(310, 170),
-                Size = new Size(210, 23),
-                DropDownStyle = ComboBoxStyle.DropDownList
-            };
-            Controls.Add(cboIncompleteSessions);
-
-            // Add Resume button
-            btnResumeSession = new MaterialButton
-            {
-                Text = "Resume Session",
-                Location = new Point(530, 170),
-                Size = new Size(120, 23)
-            };
-            btnResumeSession.Click += (s, e) => _viewModel.ResumeSessionCommand.Execute(null);
-            Controls.Add(btnResumeSession);
+            // The ComboBox and Resume button are now part of actionButtonsPanel
+            // So, the direct .Controls.Add calls for them are removed from here.
         }
 
         /// <summary>

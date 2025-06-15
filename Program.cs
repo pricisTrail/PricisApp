@@ -39,6 +39,7 @@ internal static class Program
     public static IConfiguration Configuration => _configuration ?? throw new InvalidOperationException("Configuration not initialized");
 
     [STAThread]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows7.0")]
     static void Main(string[] args)
     {
         // Add startup logging
@@ -280,6 +281,7 @@ internal static class Program
         }
     }
 
+    [System.Runtime.Versioning.SupportedOSPlatform("windows7.0")]
     private static void SetupExceptionHandling()
     {
         // Handle exceptions in all threads
@@ -321,7 +323,7 @@ internal static class Program
             // Capture exception in Sentry if configured
             if (!string.IsNullOrEmpty(_appSettings?.Sentry?.Dsn))
             {
-                SentrySdk.CaptureException(exception);
+                if (exception != null) { SentrySdk.CaptureException(exception); }
             }
             
             // Track exception in AppCenter if configured
@@ -353,7 +355,7 @@ internal static class Program
             // Capture fatal exception in Sentry if configured
             if (!string.IsNullOrEmpty(_appSettings?.Sentry?.Dsn))
             {
-                SentrySdk.CaptureException(exception);
+                if (exception != null) { SentrySdk.CaptureException(exception); }
                 // Ensure all events are sent before the application exits
                 SentrySdk.FlushAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
             }
@@ -381,6 +383,7 @@ internal static class Program
         }
     }
 
+    [System.Runtime.Versioning.SupportedOSPlatform("windows7.0")]
     private static void ConfigureServices()
     {
         Console.WriteLine("Starting ConfigureServices...");
@@ -449,7 +452,8 @@ internal static class Program
         services.AddTransient<UI.DashboardForm>(provider => {
             Console.WriteLine("Creating DashboardForm...");
             var viewModel = provider.GetRequiredService<DashboardViewModel>();
-            return new UI.DashboardForm(viewModel);
+            var dbHelper = provider.GetRequiredService<DatabaseHelper>();
+            return new UI.DashboardForm(viewModel, dbHelper);
         });
         Console.WriteLine("Added forms to services");
 
