@@ -10,806 +10,469 @@ using System.Windows.Forms;
 using System.IO;
 using System.Diagnostics;
 using System.Text.Json;
-using PricisApp.Interfaces;
-using PricisApp.Models;
+using PricisApp.Core.Interfaces;
+using PricisApp.Core.Entities;
 using PricisApp.Services;
 using PricisApp.Properties;
 using System.Runtime.Versioning;
 using PricisApp.UI;
 using System.Runtime.Serialization;
 using Microsoft.Extensions.Configuration;
-
-[assembly: SupportedOSPlatform("windows7.0")]
+using PricisApp.ViewModels;
+using MaterialSkin;
+using MaterialSkin.Controls;
+using ScottPlot;
+using PricisApp.Interfaces;
 
 namespace PricisApp
 {
     /// <summary>
     /// Main form for the PricisApp time tracking application.
     /// </summary>
-    public partial class Form1 : Form
+    [SupportedOSPlatform("windows")]
+    public partial class Form1 : MaterialForm
     {
-        private readonly DatabaseHelper db;
-        private readonly ITaskService _taskService;
-        private readonly ISessionService _sessionService;
-        private readonly ICategoryRepository _categoryRepository;
-        private readonly ThemeManager _themeManager = new();
-        private readonly IConfigurationService _configService;
-        private int? currentTaskId = null;
-        private int? currentSessionId = null;
-        private bool isTimerRunning = false;
-        private bool isPaused = false;
-        private readonly Stopwatch stopwatch = new();
-        private TimeSpan elapsedTime = TimeSpan.Zero;
-        private TimeSpan totalPausedTime = TimeSpan.Zero;
-
-        private Button btnSummary = new();
-        private Button btnPauseResume = new();
-        private Button btnThemeToggle = new();
-        private ToolStripMenuItem filterAllMenu = new();
-        private ToolStripMenuItem filterCompleteMenu = new();
-        private ToolStripMenuItem filterIncompleteMenu = new();
-
-        private class UserState
-        {
-            public int? LastTaskId { get; set; }
-            public bool IsTimerRunning { get; set; }
-            public bool IsPaused { get; set; }
-            public double ElapsedSeconds { get; set; }
-            public string? Theme { get; set; }
-        }
-
-        private readonly string userStatePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PricisApp", "userstate.json");
+        private readonly MainViewModel _viewModel;
+        private readonly MaterialSkinManager _materialSkinManager;
+        private readonly BindingSource _categoriesBindingSource = new();
+        private readonly BindingSource _sessionsBindingSource = new();
+        private ComboBox cboIncompleteSessions;
+        private MaterialButton btnResumeSession;
 
         /// <summary>
         /// Initializes the main form and its components.
         /// </summary>
-        public Form1(DatabaseHelper dbHelper, ITaskService taskService, ISessionService sessionService, ICategoryRepository categoryRepository, IConfigurationService configService)
+        public Form1(DatabaseHelper dbHelper, ITaskService taskService, ISessionService sessionService, 
+                    ICategoryRepository categoryRepository, IConfigurationService configService, IServiceProvider serviceProvider)
         {
             InitializeComponent();
-            db = dbHelper;
-            _taskService = taskService;
-            _sessionService = sessionService;
-            _categoryRepository = categoryRepository;
-            _configService = configService;
             
+            // Initialize MaterialSkinManager
+            _materialSkinManager = MaterialSkinManager.Instance;
+            _materialSkinManager.AddFormToManage(this);
+            
+            // Initialize the view model
+            _viewModel = new MainViewModel(taskService, sessionService, categoryRepository, configService, serviceProvider, this);
+            
+            // Subscribe to collection changes for live updates
+            _viewModel.Tasks.CollectionChanged += (s, e) => UpdateTaskList();
+            
+            // Setup UI
+            InitializeControls();
             InitializeEventHandlers();
-            InitializeTheme();
-            LoadThemePreference();
-            LoadUserState();
-            _ = LoadTasks();
+            InitializeDataBindings();
+
+            // Apply the initial theme
+            ApplyTheme();
+
+            CenterTimerPanel();
+            this.Resize += (s, e) => CenterTimerPanel();
         }
 
         /// <summary>
-        /// Sets up the theme selector options.
+        /// Sets up the UI controls that are created dynamically.
         /// </summary>
-        private void InitializeTheme()
+        private void InitializeControls()
         {
-            themeSelector.Items.Clear();
-            themeSelector.Items.AddRange(_configService.GetAvailableThemes());
-        }
-
-        /// <summary>
-        /// Sets up event handlers for controls and owner-draw for the task list.
-        /// </summary>
-        private void InitializeEventHandlers()
-        {
-            timer.Tick += Timer_Tick;
-            btnStart.Click += BtnStart_Click;
-            btnStop.Click += BtnStop_Click;
-            btnReset.Click += BtnReset_Click;
-            themeSelector.SelectedIndexChanged += ThemeSelector_SelectedIndexChanged;
-            btnNewTask.Click += BtnNewTask_Click;
-            listTasks.SelectedIndexChanged += ListTasks_SelectedIndexChanged;
-            btnThemeToggle.Click += BtnThemeToggle_Click;
+            // Initialize binding sources
+            _categoriesBindingSource.DataSource = _viewModel.Categories;
+            _sessionsBindingSource.DataSource = _viewModel.Sessions;
             
-            // Add event handlers for tags and category
-            txtTags.Leave += TxtTags_Leave;
-            cboCategories.SelectedIndexChanged += CboCategories_SelectedIndexChanged;
-            btnNewCategory.Click += BtnNewCategory_Click;
+            // Initialize theme selector
+            themeSelector.DataSource = _viewModel.AvailableThemes;
+            themeSelector.SelectedItem = _viewModel.CurrentTheme;
 
-            // Setup session service event handlers
-            _sessionService.TimerTick += (s, e) => lblTime.Text = _sessionService.ElapsedTime.ToString(@"hh\:mm\:ss\.ff");
-            _sessionService.TimerStarted += (s, e) => UpdateButtonStates();
-            _sessionService.TimerStopped += (s, e) => UpdateButtonStates();
-            _sessionService.TimerPaused += (s, e) => btnPauseResume.Text = "Resume";
-            _sessionService.TimerResumed += (s, e) => btnPauseResume.Text = "Pause";
-
-            btnSummary = new Button
+            // Create additional buttons
+            var btnSummary = new MaterialButton
             {
                 Text = "Show Summary",
                 Location = new Point(310, 110),
                 Size = new Size(100, 23)
             };
-            btnSummary.Click += BtnSummary_Click;
+            btnSummary.Click += (s, e) => _viewModel.ShowSummaryCommand.Execute(null);
             Controls.Add(btnSummary);
 
-            btnPauseResume = new Button
+            var btnDashboard = new MaterialButton
+            {
+                Text = "Dashboard",
+                Location = new Point(310, 140),
+                Size = new Size(100, 23)
+            };
+            btnDashboard.Click += (s, e) => _viewModel.ShowDashboardCommand.Execute(null);
+            Controls.Add(btnDashboard);
+
+            var btnPauseResume = new MaterialButton
             {
                 Text = "Pause",
                 Location = new Point(420, 110),
                 Size = new Size(100, 23)
             };
-            btnPauseResume.Click += BtnPauseResume_Click;
+            btnPauseResume.Click += (s, e) => _viewModel.PauseResumeCommand.Execute(null);
             Controls.Add(btnPauseResume);
 
-            // Context menu for filtering and task actions
+            var btnThemeToggle = new MaterialButton
+            {
+                Text = "Toggle Theme",
+                Location = new Point(530, 110),
+                Size = new Size(100, 23)
+            };
+            btnThemeToggle.Click += (s, e) => _viewModel.ToggleThemeCommand.Execute(null);
+            Controls.Add(btnThemeToggle);
+
+            // Setup context menu for the task list
             var ctxMenu = new ContextMenuStrip();
             var filterMenu = new ToolStripMenuItem("Filter Tasks");
-            filterAllMenu = new ToolStripMenuItem("Show All", null, (s, e) => FilterTasks(null));
-            filterCompleteMenu = new ToolStripMenuItem("Show Complete", null, (s, e) => FilterTasks(true));
-            filterIncompleteMenu = new ToolStripMenuItem("Show Incomplete", null, (s, e) => FilterTasks(false));
+            var filterAllMenu = new ToolStripMenuItem("Show All", null, (s, e) => _viewModel.FilterAllCommand.Execute(null));
+            var filterCompleteMenu = new ToolStripMenuItem("Show Complete", null, (s, e) => _viewModel.FilterCompleteCommand.Execute(null));
+            var filterIncompleteMenu = new ToolStripMenuItem("Show Incomplete", null, (s, e) => _viewModel.FilterIncompleteCommand.Execute(null));
             filterMenu.DropDownItems.Add(filterAllMenu);
             filterMenu.DropDownItems.Add(filterCompleteMenu);
             filterMenu.DropDownItems.Add(filterIncompleteMenu);
             ctxMenu.Items.Add(filterMenu);
-            ctxMenu.Items.Add("Delete", null, (s, e) => DeleteSelectedTask());
-            ctxMenu.Items.Add("Toggle Complete", null, (s, e) => ToggleTaskCompletion());
-            ctxMenu.Items.Add("Start/Stop Timer", null, (s, e) => StartStopTimerForSelectedTask());
+            ctxMenu.Items.Add("Delete", null, (s, e) => _viewModel.DeleteTaskCommand.Execute(null));
+            ctxMenu.Items.Add("Toggle Complete", null, (s, e) => StartStopTimerForSelectedTask());
             listTasks.ContextMenuStrip = ctxMenu;
 
-            // Owner-draw for completion visual feedback
-            listTasks.DrawMode = DrawMode.OwnerDrawVariable;
-            listTasks.MeasureItem += (s, e) => { e.ItemHeight = 20; };
-            listTasks.DrawItem += (s, e) =>
-            {
-                if (e.Index < 0 || e.Index >= listTasks.Items.Count) return;
-                e.DrawBackground();
-                var item = (TaskItem)listTasks.Items[e.Index];
-                var font = item.IsComplete && e.Font != null ? new Font(e.Font, FontStyle.Strikeout) : e.Font;
-                if (font != null)
-                {
-                    using var brush = new SolidBrush(e.ForeColor);
-                    e.Graphics.DrawString(item.Name, font, brush, e.Bounds);
-                }
-                if (item.Id == currentTaskId)
-                {
-                    e.Graphics.FillRectangle(Brushes.LightBlue, e.Bounds);
-                }
-                e.DrawFocusRectangle();
-            };
-
-            FormClosing += Form1_FormClosing;
-        }
-
-        private void Timer_Tick(object? sender, EventArgs e)
-        {
-            _sessionService.UpdateTimer();
-        }
-
-        private async void BtnStart_Click(object? sender, EventArgs e)
-        {
-            if (currentTaskId == null)
-            {
-                UIManager.ShowWarning(this, "Please select or create a task first");
-                return;
-            }
-            
-            try
-            {
-                await UIManager.ShowLoading(this, async () =>
-                {
-                    await _sessionService.StartSessionAsync(currentTaskId.Value);
-                    timer.Start();
-                }, "Starting session...");
-            }
-            catch (Exception ex)
-            {
-                UIManager.ShowDetailedError(this, ex, "starting the session");
-            }
-        }
-
-        private async void BtnStop_Click(object? sender, EventArgs e)
-        {
-            if (!_sessionService.IsTimerRunning || !_sessionService.CurrentSessionId.HasValue) return;
-            
-            try
-            {
-                await UIManager.ShowLoading(this, async () =>
-                {
-                    timer.Stop();
-                    await _sessionService.EndSessionAsync(_sessionService.CurrentSessionId.Value);
-                    if (currentTaskId.HasValue)
-                    {
-                        await LoadSessions(currentTaskId.Value);
-                    }
-                }, "Stopping session...");
-            }
-            catch (Exception ex)
-            {
-                UIManager.ShowDetailedError(this, ex, "stopping the session");
-            }
-        }
-
-        private void BtnReset_Click(object? sender, EventArgs e)
-        {
-            timer.Stop();
-            _sessionService.ResetTimer();
-            lblTime.Text = "00:00:00";
+            // Update button states based on current view model state
             UpdateButtonStates();
-        }
 
-        private void ThemeSelector_SelectedIndexChanged(object? sender, EventArgs e)
-        {
-            var theme = themeSelector.SelectedItem?.ToString();
-            if (theme != null)
+            // Add ComboBox for incomplete sessions
+            cboIncompleteSessions = new ComboBox
             {
-                _themeManager.ApplyTheme(this, theme);
-                SaveThemePreference(theme);
-            }
-        }
-
-        private async void BtnNewTask_Click(object? sender, EventArgs e)
-        {
-            var taskName = txtTaskName.Text.Trim();
-            
-            // Validate task name
-            if (string.IsNullOrWhiteSpace(taskName))
-            {
-                UIManager.ShowWarning(this, "Please enter a task name");
-                txtTaskName.Focus();
-                return;
-            }
-            
-            if (taskName.Length < 3)
-            {
-                UIManager.ShowWarning(this, "Task name must be at least 3 characters long");
-                txtTaskName.Focus();
-                return;
-            }
-            
-            if (taskName.Length > 100)
-            {
-                UIManager.ShowWarning(this, "Task name cannot exceed 100 characters");
-                txtTaskName.Focus();
-                return;
-            }
-            
-            // Check for invalid characters
-            if (taskName.IndexOfAny(new char[] { '/', '\\', ':', '*', '?', '"', '<', '>', '|' }) >= 0)
-            {
-                UIManager.ShowWarning(this, "Task name contains invalid characters (/ \\ : * ? \" < > |)");
-                txtTaskName.Focus();
-                return;
-            }
-
-            try
-            {
-                await UIManager.ShowLoading(this, async () =>
-                {
-                    await _taskService.CreateTaskAsync(taskName);
-                    txtTaskName.Clear();
-                    await LoadTasks();
-                }, "Creating new task...");
-            }
-            catch (Exception ex)
-            {
-                UIManager.ShowDetailedError(this, ex, "creating new task");
-            }
-        }
-
-        private async void ListTasks_SelectedIndexChanged(object? sender, EventArgs e)
-        {
-            if (listTasks.SelectedItem is TaskItem selectedTask)
-            {
-                currentTaskId = selectedTask.Id;
-                try
-                {
-                    await UIManager.ShowLoading(this, async () =>
-                    {
-                        await LoadSessions(selectedTask.Id);
-                        
-                        // Load and display tags
-                        var tags = await _taskService.GetTaskTagsAsync(selectedTask.Id);
-                        txtTags.Text = string.Join(", ", tags);
-                        
-                        // Select the correct category
-                        cboCategories.SelectedIndex = 0; // Default to "No Category"
-                        if (selectedTask.CategoryId.HasValue)
-                        {
-                            for (int i = 0; i < cboCategories.Items.Count; i++)
-                            {
-                                if (cboCategories.Items[i] is Category category && category.Id == selectedTask.CategoryId.Value)
-                                {
-                                    cboCategories.SelectedIndex = i;
-                                    break;
-                                }
-                            }
-                        }
-                    }, "Loading task sessions...");
-                }
-                catch (Exception ex)
-                {
-                    UIManager.ShowDetailedError(this, ex, "loading task sessions");
-                }
-            }
-        }
-
-        private async Task LoadTasks()
-        {
-            try
-            {
-                await UIManager.ShowLoading(this, async () =>
-                {
-                    listTasks.Items.Clear();
-                    var tasks = await _taskService.GetAllTasksAsync();
-                    foreach (var task in tasks)
-                    {
-                        listTasks.Items.Add(task);
-                    }
-                }, "Loading tasks...");
-            }
-            catch (Exception ex)
-            {
-                UIManager.ShowDetailedError(this, ex, "loading tasks");
-            }
-        }
-
-        private async Task LoadSessions(int taskId)
-        {
-            try
-            {
-                var sessions = await _sessionService.GetTaskSessionsAsync(taskId);
-                dataSessions.DataSource = sessions;
-                FormatDataGridView();
-            }
-            catch (Exception ex)
-            {
-                UIManager.ShowDetailedError(this, ex, "loading sessions");
-            }
-        }
-
-        private async void BtnSummary_Click(object? sender, EventArgs e)
-        {
-            try
-            {
-                await UIManager.ShowLoading(this, async () =>
-                {
-                    var summary = await _sessionService.GetSessionSummaryAsync();
-                    dataSessions.DataSource = summary;
-                    FormatDataGridView();
-                }, "Loading summary...");
-            }
-            catch (Exception ex)
-            {
-                UIManager.ShowDetailedError(this, ex, "loading summary");
-            }
-        }
-
-        private void FormatDataGridView()
-        {
-            dataSessions.AlternatingRowsDefaultCellStyle.BackColor = Color.LightGray;
-            dataSessions.EnableHeadersVisualStyles = false;
-            dataSessions.ColumnHeadersDefaultCellStyle.BackColor = Color.SteelBlue;
-            dataSessions.ColumnHeadersDefaultCellStyle.ForeColor = Color.White;
-            dataSessions.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-        }
-
-        private void UpdateButtonStates()
-        {
-            btnStart.Enabled = !_sessionService.IsTimerRunning;
-            btnStop.Enabled = _sessionService.IsTimerRunning;
-            btnReset.Enabled = true;
-        }
-
-        private void BtnPauseResume_Click(object? sender, EventArgs e)
-        {
-            _sessionService.TogglePause();
-        }
-
-        private void Form1_FormClosing(object? sender, FormClosingEventArgs e)
-        {
-            db.Dispose();
-            SaveUserState();
-        }
-
-        private async void DeleteSelectedTask()
-        {
-            if (listTasks.SelectedItem == null)
-            {
-                UIManager.ShowWarning(this, "Please select a task to delete");
-                return;
-            }
-
-            if (UIManager.ShowConfirmation(this, "Are you sure you want to delete this task?") == DialogResult.Yes)
-            {
-                try
-                {
-                    await UIManager.ShowLoading(this, async () =>
-                    {
-                        var task = (TaskItem)listTasks.SelectedItem;
-                        await _taskService.DeleteTaskAsync(task.Id);
-                        await LoadTasks();
-                    }, "Deleting task...");
-                }
-                catch (Exception ex)
-                {
-                    UIManager.ShowDetailedError(this, ex, "deleting task");
-                }
-            }
-        }
-
-        private async void ToggleTaskCompletion()
-        {
-            if (listTasks.SelectedItem is not TaskItem selectedTask) return;
-            try
-            {
-                await UIManager.ShowLoading(this, async () =>
-                {
-                    await _taskService.ToggleTaskCompletion(selectedTask.Id);
-                    await LoadTasks();
-                    foreach (var item in listTasks.Items)
-                    {
-                        if (item is TaskItem task && task.Id == selectedTask.Id)
-                        {
-                            listTasks.SelectedItem = item;
-                            break;
-                        }
-                    }
-                }, "Updating task status...");
-            }
-            catch (Exception ex)
-            {
-                UIManager.ShowDetailedError(this, ex, "toggling task completion");
-            }
-        }
-
-        private void SaveThemePreference(string? theme)
-        {
-            if (theme == null) return;
-            
-            // Save to user state for backward compatibility
-            var state = LoadUserState() ?? new UserState();
-            state.Theme = theme;
-            Directory.CreateDirectory(Path.GetDirectoryName(userStatePath)!);
-            File.WriteAllText(userStatePath, JsonSerializer.Serialize(state));
-            
-            // Also save using the configuration service
-            _configService.SaveUserSetting("UI:DefaultTheme", theme);
-        }
-
-        private void LoadThemePreference()
-        {
-            try
-            {
-                // First try to get theme from configuration service
-                string theme = _configService.GetDefaultTheme();
-                
-                // For backward compatibility, check user state too
-                var userState = LoadUserState();
-                if (userState?.Theme != null)
-                {
-                    theme = userState.Theme;
-                }
-                
-                if (!string.IsNullOrEmpty(theme))
-                {
-                    themeSelector.SelectedItem = theme;
-                    ApplyTheme(theme);
-                }
-            }
-            catch (Exception ex)
-            {
-                // Ignore theme loading errors
-                Debug.WriteLine($"Error loading theme preference: {ex.Message}");
-            }
-        }
-
-        private void ApplyTheme(string theme)
-        {
-            _themeManager.ApplyTheme(this, theme);
-            btnThemeToggle.Text = theme.ToLower().Contains("dark") ? "Light Mode" : "Dark Mode";
-        }
-
-        private async void FilterTasks(bool? showComplete)
-        {
-            try
-            {
-                await UIManager.ShowLoading(this, async () =>
-                {
-                    var tasks = await _taskService.FilterTasksAsync(showComplete);
-                    listTasks.Items.Clear();
-                    foreach (var task in tasks)
-                    {
-                        listTasks.Items.Add(task);
-                    }
-                    // Update menu item check states
-                    filterAllMenu.Checked = showComplete == null;
-                    filterCompleteMenu.Checked = showComplete == true;
-                    filterIncompleteMenu.Checked = showComplete == false;
-                }, "Filtering tasks...");
-            }
-            catch (Exception ex)
-            {
-                UIManager.ShowDetailedError(this, ex, "filtering tasks");
-            }
-        }
-
-        private async void BtnNewCategory_Click(object? sender, EventArgs e)
-        {
-            using var form = new Form
-            {
-                Text = "New Category",
-                Size = new Size(300, 180),
-                FormBorderStyle = FormBorderStyle.FixedDialog,
-                StartPosition = FormStartPosition.CenterParent
+                Location = new Point(310, 170),
+                Size = new Size(210, 23),
+                DropDownStyle = ComboBoxStyle.DropDownList
             };
-            var lblName = new Label { Text = "Name:", Left = 20, Top = 20 };
-            var txtName = new TextBox { Left = 100, Top = 20, Width = 160 };
-            var lblColor = new Label { Text = "Color:", Left = 20, Top = 50 };
-            var colorPicker = new ColorDialog();
-            var btnColor = new Button { Text = "Pick Color", Left = 100, Top = 50, Width = 160 };
-            var btnOk = new Button { Text = "OK", Left = 120, Top = 100, DialogResult = DialogResult.OK };
-            
-            // Set a default color
-            btnColor.BackColor = Color.LightBlue;
-            
-            btnColor.Click += (s, ev) => {
-                if (colorPicker.ShowDialog() == DialogResult.OK)
-                {
-                    btnColor.BackColor = colorPicker.Color;
-                }
-            };
-            
-            form.Controls.AddRange(new Control[] { lblName, txtName, lblColor, btnColor, btnOk });
-            form.AcceptButton = btnOk;
-            
-            // Override the form's OK button click to validate inputs
-            form.FormClosing += (s, ev) => {
-                if (form.DialogResult == DialogResult.OK)
-                {
-                    string categoryName = txtName.Text.Trim();
-                    
-                    // Validate category name
-                    if (string.IsNullOrWhiteSpace(categoryName))
-                    {
-                        MessageBox.Show("Please enter a category name", "Validation Error", 
-                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        txtName.Focus();
-                        ev.Cancel = true;
-                        return;
-                    }
-                    
-                    if (categoryName.Length < 2)
-                    {
-                        MessageBox.Show("Category name must be at least 2 characters long", "Validation Error", 
-                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        txtName.Focus();
-                        ev.Cancel = true;
-                        return;
-                    }
-                    
-                    if (categoryName.Length > 50)
-                    {
-                        MessageBox.Show("Category name cannot exceed 50 characters", "Validation Error", 
-                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        txtName.Focus();
-                        ev.Cancel = true;
-                        return;
-                    }
-                }
-            };
-            
-            if (form.ShowDialog() == DialogResult.OK)
-            {
-                try
-                {
-                    await UIManager.ShowLoading(this, async () =>
-                    {
-                        var color = btnColor.BackColor.ToArgb().ToString("X6");
-                        await _categoryRepository.InsertCategoryAsync(txtName.Text, color);
-                        await LoadCategories();
-                    }, "Creating category...");
-                }
-                catch (Exception ex)
-                {
-                    UIManager.ShowDetailedError(this, ex, "creating category");
-                }
-            }
-        }
+            Controls.Add(cboIncompleteSessions);
 
-        private async Task LoadCategories()
-        {
-            try
+            // Add Resume button
+            btnResumeSession = new MaterialButton
             {
-                await UIManager.ShowLoading(this, async () =>
-                {
-                    cboCategories.Items.Clear();
-                    var categories = await _categoryRepository.GetAllCategoriesAsync();
-                    cboCategories.Items.Add("(No Category)");
-                    foreach (var category in categories)
-                    {
-                        cboCategories.Items.Add(category);
-                    }
-                }, "Loading categories...");
-            }
-            catch (Exception ex)
-            {
-                UIManager.ShowDetailedError(this, ex, "loading categories");
-            }
-        }
-
-        private async void ExitToolStripMenuItem_Click(object? sender, EventArgs e)
-        {
-            Close();
+                Text = "Resume Session",
+                Location = new Point(530, 170),
+                Size = new Size(120, 23)
+            };
+            btnResumeSession.Click += (s, e) => _viewModel.ResumeSessionCommand.Execute(null);
+            Controls.Add(btnResumeSession);
         }
 
         /// <summary>
-        /// Custom color table for menu strip theming.
+        /// Sets up event handlers for controls.
         /// </summary>
-        private class CustomColorTable : ProfessionalColorTable
+        private void InitializeEventHandlers()
         {
-            private readonly Color _backColor;
-            public CustomColorTable(Color backColor) => _backColor = backColor;
-            public override Color MenuItemSelected => _backColor;
-            public override Color MenuItemSelectedGradientBegin => _backColor;
-            public override Color MenuItemSelectedGradientEnd => _backColor;
-            public override Color MenuItemBorder => Color.Gray;
-            public override Color MenuStripGradientBegin => _backColor;
-            public override Color MenuStripGradientEnd => _backColor;
-            public override Color ToolStripDropDownBackground => _backColor;
-        }
-
-        private void SaveUserState()
-        {
-            var state = new UserState
-            {
-                LastTaskId = currentTaskId,
-                IsTimerRunning = _sessionService.IsTimerRunning,
-                IsPaused = _sessionService.IsPaused,
-                ElapsedSeconds = _sessionService.ElapsedTime.TotalSeconds,
-                Theme = themeSelector.SelectedItem?.ToString()
-            };
-            Directory.CreateDirectory(Path.GetDirectoryName(userStatePath)!);
-            File.WriteAllText(userStatePath, JsonSerializer.Serialize(state));
-        }
-
-        private UserState LoadUserState()
-        {
-            if (File.Exists(userStatePath))
-            {
-                return JsonSerializer.Deserialize<UserState>(File.ReadAllText(userStatePath));
-            }
-            return null;
-        }
-
-        private void BtnThemeToggle_Click(object? sender, EventArgs e)
-        {
-            var isDark = themeSelector.SelectedItem?.ToString()?.ToLower().Contains("dark") == true;
+            // Button event handlers
+            btnStart.Click += (s, e) => _viewModel.StartCommand.Execute(null);
+            btnStop.Click += (s, e) => _viewModel.StopCommand.Execute(null);
+            btnReset.Click += (s, e) => _viewModel.ResetCommand.Execute(null);
+            btnNewTask.Click += (s, e) => _viewModel.NewTaskCommand.Execute(null);
+            btnNewCategory.Click += (s, e) => _viewModel.NewCategoryCommand.Execute(null);
             
-            if (isDark)
+            // List selection event handlers
+            listTasks.SelectedIndexChanged += (sender, item) => ListTasks_SelectedIndexChanged(sender, item);
+            
+            // Input controls event handlers
+            txtTags.Leave += (s, e) => _viewModel.SaveTagsCommand.Execute(null);
+            cboCategories.SelectedIndexChanged += (s, e) => _viewModel.SaveCategoryCommand.Execute(null);
+            themeSelector.SelectedIndexChanged += ThemeSelector_SelectedIndexChanged;
+            
+            // Ensure TaskName is updated as user types
+            txtTaskName.TextChanged += (s, e) =>
             {
-                ApplyTheme("Light");
-                btnThemeToggle.Text = "Dark Mode";
-                SaveThemePreference("Light");
+                Debug.WriteLine("TextChanged: " + txtTaskName.Text);
+                _viewModel.TaskName = txtTaskName.Text;
+                UpdateButtonStates();
+            };
+            
+            // Form closing event
+            // FormClosing += (s, e) => _viewModel.SaveUserStateCommand?.Execute(null);
+            
+            // Subscribe to property changes from the view model
+            _viewModel.PropertyChanged += ViewModel_PropertyChanged;
+            // _viewModel.Tasks.CollectionChanged += (s, e) => UpdateTaskList();
+        }
+
+        /// <summary>
+        /// Sets up data bindings between the view model and UI controls.
+        /// </summary>
+        private void InitializeDataBindings()
+        {
+            // Bind categories combobox
+            cboCategories.DataSource = _categoriesBindingSource;
+            cboCategories.DisplayMember = "Name";
+            cboCategories.ValueMember = "Id";
+            
+            // Bind text fields using two-way binding
+            txtTags.DataBindings.Add(new Binding("Text", _viewModel, "Tags", true, DataSourceUpdateMode.OnPropertyChanged));
+            
+            // Bind sessions grid
+            dataGridSessions.DataSource = _sessionsBindingSource;
+            
+            // Format the grid
+            FormatDataGridView();
+            
+            // Setup chart data
+            LoadChartData();
+
+            // Populate task list for the first time
+            UpdateTaskList();
+
+            // Bind incomplete sessions ComboBox
+            cboIncompleteSessions.DataSource = _viewModel.IncompleteSessions;
+            cboIncompleteSessions.DisplayMember = "StartTime";
+            cboIncompleteSessions.ValueMember = "Id";
+            cboIncompleteSessions.SelectedIndexChanged += (s, e) =>
+            {
+                if (cboIncompleteSessions.SelectedItem is PricisApp.Core.Entities.Session session)
+                    _viewModel.SelectedIncompleteSession = session;
+            };
+        }
+
+        /// <summary>
+        /// Populates the listTasks control with tasks from the view model.
+        /// </summary>
+        private void UpdateTaskList()
+        {
+            listTasks.Items.Clear();
+            foreach (var task in _viewModel.Tasks)
+            {
+                var item = new MaterialListBoxItem(task.Name) { Tag = task };
+                listTasks.Items.Add(item);
+            }
+        }
+
+        /// <summary>
+        /// Loads chart data from the view model.
+        /// </summary>
+        private void LoadChartData()
+        {
+            formsPlot1.Plot.Clear();
+            formsPlot1.Plot.AddScatter(_viewModel.ChartDataX, _viewModel.ChartDataY);
+            formsPlot1.Refresh();
+        }
+
+        /// <summary>
+        /// Handles theme selector changes.
+        /// </summary>
+        private void ThemeSelector_SelectedIndexChanged(object? sender, EventArgs e)
+        {
+            if (themeSelector.SelectedItem is string selectedTheme)
+            {
+                _viewModel.CurrentTheme = selectedTheme;
+            }
+        }
+
+        /// <summary>
+        /// Formats the data grid view columns.
+        /// </summary>
+        private void FormatDataGridView()
+        {
+            if (dataGridSessions.Columns.Count > 0)
+            {
+                dataGridSessions.Columns["Id"].Visible = false;
+                dataGridSessions.Columns["TaskId"].Visible = false;
+                
+                if (dataGridSessions.Columns.Contains("StartTime"))
+                    dataGridSessions.Columns["StartTime"].HeaderText = "Start Time";
+                
+                if (dataGridSessions.Columns.Contains("EndTime"))
+                    dataGridSessions.Columns["EndTime"].HeaderText = "End Time";
+                
+                if (dataGridSessions.Columns.Contains("Duration"))
+                    dataGridSessions.Columns["Duration"].HeaderText = "Duration (hh:mm:ss)";
+            }
+        }
+
+        /// <summary>
+        /// Handles property changes from the view model.
+        /// </summary>
+        private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+        {
+            switch (e.PropertyName)
+            {
+                case nameof(MainViewModel.ElapsedTime):
+                    lblTime.Text = _viewModel.ElapsedTime.ToString(@"hh\:mm\:ss\.ff");
+                    break;
+                case nameof(MainViewModel.IsTimerRunning):
+                case nameof(MainViewModel.IsPaused):
+                    UpdateButtonStates();
+                    UpdateSessionStateLabel();
+                    break;
+                case nameof(MainViewModel.SelectedTask):
+                    UpdateCurrentTaskLabel();
+                    break;
+                case nameof(MainViewModel.Categories):
+                    _categoriesBindingSource.DataSource = _viewModel.Categories;
+                    break;
+                    
+                case nameof(MainViewModel.Sessions):
+                    _sessionsBindingSource.DataSource = _viewModel.Sessions;
+                    FormatDataGridView();
+                    break;
+                    
+                case nameof(MainViewModel.Tasks):
+                    UpdateTaskList();
+                    break;
+                    
+                case nameof(MainViewModel.ChartDataX):
+                case nameof(MainViewModel.ChartDataY):
+                    LoadChartData();
+                    break;
+                case nameof(MainViewModel.CurrentTheme):
+                    ApplyTheme();
+                    break;
+                case nameof(MainViewModel.IncompleteSessions):
+                    cboIncompleteSessions.DataSource = null;
+                    cboIncompleteSessions.DataSource = _viewModel.IncompleteSessions;
+                    cboIncompleteSessions.DisplayMember = "StartTime";
+                    cboIncompleteSessions.ValueMember = "Id";
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// Updates the enabled state of buttons based on the current state.
+        /// </summary>
+        private void UpdateButtonStates()
+        {
+            btnStart.Enabled = _viewModel.StartCommand.CanExecute(null);
+            btnStop.Enabled = _viewModel.StopCommand.CanExecute(null);
+            btnReset.Enabled = true; // Reset is always available
+            btnNewTask.Enabled = _viewModel.NewTaskCommand.CanExecute(null);
+            
+            // Update pause/resume button text
+            var pauseResumeButton = Controls.OfType<MaterialButton>().FirstOrDefault(b => b.Text == "Pause" || b.Text == "Resume");
+            if (pauseResumeButton != null)
+            {
+                pauseResumeButton.Text = _viewModel.IsPaused ? "Resume" : "Pause";
+            }
+        }
+
+        /// <summary>
+        /// Handles the selection change in the task list.
+        /// </summary>
+        private void ListTasks_SelectedIndexChanged(object? sender, MaterialListBoxItem selectedItem)
+        {
+            if (selectedItem?.Tag is TaskItem selectedTask)
+            {
+                _viewModel.SelectedTask = selectedTask;
+                UpdateCurrentTaskLabel();
             }
             else
             {
-                ApplyTheme("Dark");
-                btnThemeToggle.Text = "Light Mode";
-                SaveThemePreference("Dark");
+                _viewModel.SelectedTask = null;
+                UpdateCurrentTaskLabel();
             }
         }
 
+        /// <summary>
+        /// Starts or stops the timer for the selected task.
+        /// </summary>
         private void StartStopTimerForSelectedTask()
         {
-            if (listTasks.SelectedItem is not TaskItem selectedTask) return;
-            if (_sessionService.IsTimerRunning && currentTaskId == selectedTask.Id)
+            if (_viewModel.IsTimerRunning)
             {
-                BtnStop_Click(this, EventArgs.Empty);
+                _viewModel.StopCommand.Execute(null);
             }
             else
             {
-                currentTaskId = selectedTask.Id;
-                BtnStart_Click(this, EventArgs.Empty);
+                _viewModel.StartCommand.Execute(null);
             }
         }
 
-        // Fix async method warning
-        private async Task PopulateTasksAsync()
+        /// <summary>
+        /// Applies the current theme from the view model.
+        /// </summary>
+        private void ApplyTheme()
         {
-            try
+            if (_viewModel.CurrentTheme == "Dark")
             {
-                await UIManager.ShowLoading(this, async () =>
+                _materialSkinManager.Theme = MaterialSkinManager.Themes.DARK;
+                _materialSkinManager.ColorScheme = new ColorScheme(Primary.BlueGrey800, Primary.BlueGrey900, Primary.BlueGrey500, Accent.LightBlue200, TextShade.WHITE);
+            }
+            else
+            {
+                _materialSkinManager.Theme = MaterialSkinManager.Themes.LIGHT;
+                _materialSkinManager.ColorScheme = new ColorScheme(Primary.Indigo500, Primary.Indigo700, Primary.Indigo100, Accent.Pink200, TextShade.WHITE);
+            }
+            Invalidate();
+        }
+
+        private void btnResetDatabase_Click(object sender, EventArgs e)
+        {
+            // Ask for confirmation
+            DialogResult result = MessageBox.Show("Are you sure you want to reset the database schema? This action cannot be undone.", "Confirmation", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (result == DialogResult.Yes)
+            {
+                try
                 {
-                    var tasks = await _taskService.GetAllTasksAsync();
-                    // Populate the tasks list
-                }, "Loading tasks...");
-            }
-            catch (Exception ex)
-            {
-                UIManager.ShowDetailedError(this, ex, "loading tasks");
-            }
-        }
-
-        // Fix null reference warnings
-        private string GetSelectedTaskName()
-        {
-            // Return empty string instead of null
-            return "Default Task Name";
-        }
-
-        private string GetSelectedTaskCategory()
-        {
-            // Return empty string instead of null
-            return "Default Category";
-        }
-
-        // Add validation and save task tags
-        private async Task ValidateAndSaveTaskTags()
-        {
-            if (currentTaskId == null) return;
-            
-            string tagsText = txtTags.Text.Trim();
-            
-            try
-            {
-                // Split by comma and trim each tag
-                var tags = tagsText.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
-                    .Select(t => t.Trim())
-                    .Where(t => !string.IsNullOrWhiteSpace(t))
-                    .ToList();
-                
-                // Validate individual tags
-                foreach (var tag in tags)
-                {
-                    if (tag.Length > 30)
-                    {
-                        UIManager.ShowWarning(this, $"Tag '{tag}' is too long. Maximum length is 30 characters.");
-                        return;
-                    }
+                    // Call the fix database method instead of reset
+                    Task.Run(async () => await DatabaseFix.FixDatabaseAsync()).Wait();
+                    MessageBox.Show("Database has been reset successfully.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     
-                    if (tag.IndexOfAny(new char[] { '/', '\\', ':', '*', '?', '"', '<', '>', '|' }) >= 0)
-                    {
-                        UIManager.ShowWarning(this, $"Tag '{tag}' contains invalid characters (/ \\ : * ? \" < > |)");
-                        return;
-                    }
+                    // Reload data
+                    _viewModel.LoadDataCommand.Execute(null);
                 }
-                
-                await UIManager.ShowLoading(this, async () =>
+                catch (Exception ex)
                 {
-                    await _taskService.UpdateTaskTagsAsync(currentTaskId.Value, tags);
-                }, "Updating tags...");
-            }
-            catch (Exception ex)
-            {
-                UIManager.ShowDetailedError(this, ex, "updating tags");
-            }
-        }
-
-        // Add validation and save task category
-        private async Task ValidateAndSaveTaskCategory()
-        {
-            if (currentTaskId == null) return;
-            
-            try
-            {
-                int? categoryId = null;
-                
-                // If a valid category is selected (not the "No Category" option)
-                if (cboCategories.SelectedIndex > 0 && cboCategories.SelectedItem is Category selectedCategory)
-                {
-                    categoryId = selectedCategory.Id;
+                    MessageBox.Show($"Error resetting database: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
-                
-                await UIManager.ShowLoading(this, async () =>
-                {
-                    await _taskService.UpdateTaskCategoryAsync(currentTaskId.Value, categoryId);
-                }, "Updating category...");
             }
-            catch (Exception ex)
+        }
+
+        private void UpdateCurrentTaskLabel()
+        {
+            if (_viewModel.SelectedTask != null)
+                lblCurrentTask.Text = $"Current Task: {_viewModel.SelectedTask.Name}";
+            else
+                lblCurrentTask.Text = "Current Task: (none)";
+        }
+
+        private void UpdateSessionStateLabel()
+        {
+            if (_viewModel.IsTimerRunning)
             {
-                UIManager.ShowDetailedError(this, ex, "updating category");
+                if (_viewModel.IsPaused)
+                {
+                    lblSessionState.Text = "State: Paused";
+                    lblSessionState.ForeColor = System.Drawing.Color.Orange;
+                }
+                else
+                {
+                    lblSessionState.Text = "State: Running";
+                    lblSessionState.ForeColor = System.Drawing.Color.Green;
+                }
+            }
+            else
+            {
+                lblSessionState.Text = "State: Stopped";
+                lblSessionState.ForeColor = System.Drawing.Color.Gray;
             }
         }
 
-        private async void TxtTags_Leave(object? sender, EventArgs e)
+        private void CenterTimerPanel()
         {
-            await ValidateAndSaveTaskTags();
-        }
+            // Center the timerPanel horizontally at the top
+            int panelWidth = timerPanel.Width;
+            int formWidth = this.ClientSize.Width;
+            timerPanel.Left = (formWidth - panelWidth) / 2;
+            timerPanel.Top = 60; // vertical offset from top
 
-        private async void CboCategories_SelectedIndexChanged(object? sender, EventArgs e)
-        {
-            await ValidateAndSaveTaskCategory();
+            // Stack labels vertically with spacing
+            int y = 20;
+            lblCurrentTask.AutoSize = true;
+            lblCurrentTask.Location = new System.Drawing.Point((timerPanel.Width - lblCurrentTask.Width) / 2, y);
+            y += lblCurrentTask.Height + 10;
+            lblTime.AutoSize = true;
+            lblTime.Location = new System.Drawing.Point((timerPanel.Width - lblTime.Width) / 2, y);
+            y += lblTime.Height + 10;
+            lblSessionState.AutoSize = true;
+            lblSessionState.Location = new System.Drawing.Point((timerPanel.Width - lblSessionState.Width) / 2, y);
+
+            // Center the buttonRow at the bottom
+            buttonRow.Width = timerPanel.Width - 40;
+            buttonRow.Left = (timerPanel.Width - buttonRow.Width) / 2;
+            buttonRow.Top = timerPanel.Height - buttonRow.Height - 20;
         }
     }
 }

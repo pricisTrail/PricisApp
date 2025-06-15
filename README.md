@@ -106,4 +106,49 @@ To customize the application's configuration:
 
 ### User-Specific Settings
 
-User-specific settings (like the selected theme) are still stored in the user's local application data folder for backward compatibility, but the application now uses the configuration service as the primary source of configuration values. 
+User-specific settings (like the selected theme) are still stored in the user's local application data folder for backward compatibility, but the application now uses the configuration service as the primary source of configuration values.
+
+# PricisApp Improvements (June 2024)
+
+## New Features & Refactors
+
+### 1. TimerController
+- Added `Core/TimerController.cs`: an async, event-driven, reusable timer class.
+- Used by `SessionService` for all timer logic.
+
+### 2. IMemoryCache Integration
+- Added `Microsoft.Extensions.Caching.Memory`.
+- `TaskService` now caches task and tag lookups for performance.
+- Cache is invalidated on create, update, or delete.
+
+### 3. Retry Logic
+- `BaseRepository` already had robust retry logic for transient DB errors.
+- Logic reviewed and left as is.
+
+### 4. Unit & Integration Tests
+- `TaskServiceTests` updated for new constructor and cache behavior.
+- Add more tests for services as needed.
+
+### 5. Dapper Migration
+- Dapper added to project.
+- Example: `TaskRepository.InsertTaskAsync` now uses Dapper.
+- To migrate more methods, replace raw SQL with Dapper's `QueryAsync`, `ExecuteAsync`, etc.
+
+## Migration Guide: Raw SQL to Dapper
+- Replace `cmd.CommandText` and parameter setup with Dapper's parameterized methods.
+- Use `connection.QueryAsync<T>(sql, new { param1, param2 })` for queries.
+- Use `connection.ExecuteAsync(sql, new { ... })` for non-queries.
+
+## Caching Guide
+- Inject `IMemoryCache` into services.
+- Use `cache.Set(key, value, expiry)` and `cache.TryGetValue(key, out value)`.
+- Invalidate cache on data changes.
+
+## TimerController Usage
+- Create: `var timer = new TimerController(TimeSpan.FromMilliseconds(100));`
+- Events: `timer.Tick += ...`, `timer.Started += ...`, etc.
+- Methods: `Start()`, `Stop()`, `Pause()`, `Resume()`, `ResetTimer()`
+
+---
+
+For more details, see code comments and service constructors. 

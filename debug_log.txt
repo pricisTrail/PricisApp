@@ -1,0 +1,54 @@
+=== Diagnostic run at 6/8/2025 11:52:35 PM ===
+OS Version: Microsoft Windows NT 10.0.19045.0
+64-bit OS: True
+64-bit Process: True
+Current Directory: C:\Users\Win10\PricisApp
+Has Write Access: True
+Database Path: C:\Users\Win10\PricisApp\TimeTracking.db
+Database Exists: False
+WAL file exists: False
+SHM file exists: False
+Number of instances: 1
+Diagnostic completed successfully
+=== Diagnostic run at 6/8/2025 11:55:58 PM ===
+OS Version: Microsoft Windows NT 10.0.19045.0
+64-bit OS: True
+64-bit Process: True
+Current Directory: C:\Users\Win10\PricisApp
+Has Write Access: True
+Database Path: C:\Users\Win10\PricisApp\TimeTracking.db
+Database Exists: True
+Database Size: 65536 bytes
+Database can be opened successfully
+Tables in database:
+  - Categories
+  - sqlite_sequence
+  - Tasks
+  - TaskTags
+  - Sessions
+  - VersionInfo
+WAL file exists: True
+SHM file exists: True
+Number of instances: 1
+Diagnostic completed successfully
+=== Diagnostic run at 6/8/2025 11:57:14 PM ===
+OS Version: Microsoft Windows NT 10.0.19045.0
+64-bit OS: True
+64-bit Process: True
+Current Directory: C:\Users\Win10\PricisApp
+Has Write Access: True
+Database Path: C:\Users\Win10\PricisApp\TimeTracking.db
+Database Exists: True
+Database Size: 65536 bytes
+Database can be opened successfully
+Tables in database:
+  - Categories
+  - sqlite_sequence
+  - Tasks
+  - TaskTags
+  - Sessions
+  - VersionInfo
+WAL file exists: True
+SHM file exists: True
+Number of instances: 1
+Diagnostic completed successfully

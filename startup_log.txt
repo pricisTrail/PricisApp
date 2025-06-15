@@ -1,0 +1,84 @@
+6/8/2025 11:52:35 PM: Application starting
+6/8/2025 11:52:35 PM: PricisApp starting normal mode
+6/8/2025 11:55:58 PM: Application starting
+6/8/2025 11:55:58 PM: PricisApp starting normal mode
+6/8/2025 11:57:14 PM: Application starting
+6/8/2025 11:57:14 PM: PricisApp starting normal mode
+6/8/2025 11:59:04 PM: Application starting
+6/8/2025 11:59:04 PM: PricisApp starting normal mode
+6/9/2025 12:03:21 AM: Application starting
+6/9/2025 12:03:21 AM: PricisApp starting normal mode
+6/9/2025 12:05:50 AM: Application starting
+6/9/2025 12:05:50 AM: PricisApp starting normal mode
+6/9/2025 12:19:16 AM: Application starting
+6/9/2025 12:19:16 AM: PricisApp starting normal mode
+6/9/2025 12:26:08 AM: Application starting
+6/9/2025 12:26:08 AM: PricisApp starting normal mode
+6/9/2025 12:26:37 AM: Application starting
+6/9/2025 12:26:37 AM: PricisApp starting normal mode
+6/9/2025 12:37:07 AM: Application starting
+6/9/2025 12:37:07 AM: PricisApp starting normal mode
+6/10/2025 11:19:40 AM: Application starting
+6/10/2025 11:19:40 AM: PricisApp starting normal mode
+6/10/2025 11:27:54 AM: Application starting
+6/10/2025 11:27:54 AM: PricisApp starting normal mode
+6/10/2025 11:38:11 AM: Application starting
+6/10/2025 11:38:11 AM: PricisApp starting normal mode
+6/10/2025 11:40:39 AM: Application starting
+6/10/2025 11:40:39 AM: PricisApp starting normal mode
+6/10/2025 11:42:36 AM: Application starting
+6/10/2025 11:42:36 AM: PricisApp starting normal mode
+6/10/2025 11:44:52 AM: Application starting
+6/10/2025 11:44:52 AM: PricisApp starting normal mode
+6/10/2025 11:49:42 AM: Application starting
+6/10/2025 11:49:42 AM: PricisApp starting normal mode
+6/10/2025 11:52:02 AM: Application starting
+6/10/2025 11:52:02 AM: PricisApp starting normal mode
+6/10/2025 11:52:54 AM: Application starting
+6/10/2025 11:52:54 AM: PricisApp starting normal mode
+6/10/2025 11:56:20 AM: Application starting
+6/10/2025 11:56:20 AM: PricisApp starting normal mode
+6/10/2025 11:58:13 AM: Application starting
+6/10/2025 11:58:13 AM: PricisApp starting normal mode
+6/10/2025 12:01:26 PM: Application starting
+6/10/2025 12:01:26 PM: PricisApp starting normal mode
+6/10/2025 12:03:05 PM: Application starting
+6/10/2025 12:03:05 PM: PricisApp starting normal mode
+6/14/2025 9:42:56 PM: Application starting
+6/14/2025 9:42:56 PM: PricisApp starting normal mode
+6/14/2025 9:54:48 PM: Application starting
+6/14/2025 9:54:48 PM: PricisApp starting normal mode
+6/14/2025 9:57:55 PM: Application starting
+6/14/2025 9:57:56 PM: PricisApp starting normal mode
+6/14/2025 10:20:46 PM: Application starting
+6/14/2025 10:20:46 PM: PricisApp starting normal mode
+6/14/2025 10:22:59 PM: Application starting
+6/14/2025 10:22:59 PM: PricisApp starting normal mode
+6/14/2025 10:27:41 PM: Application starting
+6/14/2025 10:27:41 PM: PricisApp starting normal mode
+6/14/2025 10:29:33 PM: Application starting
+6/14/2025 10:29:33 PM: PricisApp starting normal mode
+6/14/2025 10:35:05 PM: Application starting
+6/14/2025 10:35:05 PM: PricisApp starting normal mode
+6/14/2025 10:43:01 PM: Application starting
+6/14/2025 10:43:01 PM: PricisApp starting normal mode
+06/14/2025 22:43:03: ERROR: Error creating or running main form: Index was outside the bounds of the array.
+06/14/2025 22:43:03: Stack trace:    at System.Windows.Forms.ImageList.ImageCollection.SetKeyName(Int32 index, String name)
+   at PricisApp.Form1.InitializeComponent() in C:\Users\Win10\PricisApp\Form1.Designer.cs:line 536
+   at PricisApp.Form1..ctor(DatabaseHelper dbHelper, ITaskService taskService, ISessionService sessionService, ICategoryRepository categoryRepository, IConfigurationService configService, IServiceProvider serviceProvider) in C:\Users\Win10\PricisApp\Form1.cs:line 48
+   at PricisApp.Program.<>c.<ConfigureServices>b__12_4(IServiceProvider provider) in C:\Users\Win10\PricisApp\Program.cs:line 442
+   at Microsoft.Extensions.DependencyInjection.ServiceLookup.CallSiteRuntimeResolver.VisitFactory(FactoryCallSite factoryCallSite, RuntimeResolverContext context)
+   at Microsoft.Extensions.DependencyInjection.ServiceLookup.CallSiteVisitor`2.VisitCallSiteMain(ServiceCallSite callSite, TArgument argument)
+   at Microsoft.Extensions.DependencyInjection.ServiceLookup.CallSiteRuntimeResolver.VisitDisposeCache(ServiceCallSite transientCallSite, RuntimeResolverContext context)
+   at Microsoft.Extensions.DependencyInjection.ServiceLookup.CallSiteVisitor`2.VisitCallSite(ServiceCallSite callSite, TArgument argument)
+   at Microsoft.Extensions.DependencyInjection.ServiceLookup.CallSiteRuntimeResolver.Resolve(ServiceCallSite callSite, ServiceProviderEngineScope scope)
+   at Microsoft.Extensions.DependencyInjection.ServiceLookup.DynamicServiceProviderEngine.<>c__DisplayClass2_0.<RealizeService>b__0(ServiceProviderEngineScope scope)
+   at Microsoft.Extensions.DependencyInjection.ServiceProvider.GetService(ServiceIdentifier serviceIdentifier, ServiceProviderEngineScope serviceProviderEngineScope)
+   at Microsoft.Extensions.DependencyInjection.ServiceProvider.GetService(Type serviceType)
+   at Microsoft.Extensions.DependencyInjection.ServiceProviderServiceExtensions.GetRequiredService(IServiceProvider provider, Type serviceType)
+   at Microsoft.Extensions.DependencyInjection.ServiceProviderServiceExtensions.GetRequiredService[T](IServiceProvider provider)
+   at PricisApp.Program.Main(String[] args) in C:\Users\Win10\PricisApp\Program.cs:line 217
+6/14/2025 10:53:49 PM: Application starting
+6/14/2025 10:53:49 PM: PricisApp starting normal mode
+6/14/2025 10:55:56 PM: Application starting
+6/14/2025 10:55:56 PM: PricisApp starting normal mode
